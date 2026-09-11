@@ -19,7 +19,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe app.py
 ```
 
-Optional deutlich schnellere Nachbarsuche:
+SciPy wird dringend empfohlen und beschleunigt die Nachbarsuche etwa um den
+Faktor zwei:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install scipy
@@ -27,8 +28,8 @@ Optional deutlich schnellere Nachbarsuche:
 
 Anderer Port: `python app.py --port 8766`. Ohne automatisches Browserfenster:
 `python app.py --no-browser`. Eine Serverinstanz teilt ein Becken zwischen allen
-Browser-Tabs; nur einen aktiven Tab verwenden, weil jeder Tab Simulationsschritte
-anfordert. Ohne aktiven Tab pausiert die Simulationszeit.
+Browser-Tabs; nur einen aktiven Tab verwenden. Ohne pollenden Tab pausiert die
+Simulationszeit.
 
 ## Bedienung
 
@@ -41,6 +42,50 @@ anfordert. Ohne aktiven Tab pausiert die Simulationszeit.
 - Einfülltemperatur, Pinselradius, Schwerkraft und Darstellung einstellbar.
 - Pause/Leertaste; Einzelschritt; Leeren; Dammbruch oder Wasser-Öl-Schichten.
 - Zum Zünden Öl erzeugen und die Oberfläche mit dem Wärmewerkzeug erhitzen.
+- **Physikauflösung** (fein/mittel/grob) und **Bildschärfe** unter „04 / Leistung“.
+
+## Leistung
+
+Der Solver lief zuvor im Takt der Browser-Anfrage: jeder Frame wartete auf einen
+kompletten Python-Zeitschritt, und das Ergebnis kam als JSON-Text zurück. Das
+erzeugte das Ruckeln. Geändert wurde:
+
+- **Entkoppelte Simulation.** Die Physik läuft in einem eigenen Thread und
+  veröffentlicht Frames; der Browser zeichnet unabhängig davon mit 60 Hz und
+  **interpoliert zwischen den beiden letzten Frames**. Auch wenn der Solver nur
+  30-mal pro Sekunde liefert, bleibt die Darstellung flüssig.
+- **Binärer Transport.** Partikel werden als rohes float32 (20 Byte pro Partikel)
+  übertragen statt als JSON. Bei 5000 Partikeln entfallen damit rund 150 kB Text
+  pro Frame sowie das Serialisieren und Parsen.
+- **Direkter GPU-Upload.** Der Renderer schiebt den empfangenen Puffer ohne
+  JavaScript-Schleife pro Partikel in den Vertexbuffer; Materialfarben liegen als
+  Uniform-Palette im Shader. Der Dichtepass rendert mit 55 % Auflösung, weil ihn
+  der Oberflächenpass ohnehin filtert. Die Gerätepixelrate ist auf 1,5 begrenzt.
+- **Schnellerer Solver, gleiche Physik.** Strukturierte 1-D-Arrays statt
+  (n, 2)-Zugriffen, zusammengefasste Kraftterme, aus den Materialpaaren
+  vorberechnete Koeffizienten, `cKDTree` mit unbalanciertem Aufbau und eine
+  vektorisierte Gitter-Nachbarsuche als NumPy-Ersatz für die frühere
+  Python-Schleife. Gemessen am Originalcode: **Faktor 2,1 bis 2,7**.
+
+| Szenario | vorher | nachher |
+| --- | --- | --- |
+| Dammbruch, 1248 Partikel | 118 ms/Frame | 55 ms/Frame |
+| Wasser + Öl, 2288 Partikel | 405 ms | 185 ms |
+| Becken mit 3000 Partikeln | 244 ms | 90 ms |
+| Becken mit 5000 Partikeln | 480 ms | 225 ms |
+
+Die Zahlen stammen von einem langsamen Zwei-Kern-Container und dienen dem
+Vergleich, nicht als Absolutwert. Ein identischer Vergleichslauf über 0,67 s
+Simulationszeit weicht vom Originalsolver um maximal 1,2·10⁻⁷ m ab: die
+Beschleunigung ändert das Modell nicht.
+
+**Was das nicht ist:** ein Echtzeitsolver für 5000 Partikel. NumPy bleibt
+einkernig und interpretiert; ein voller SPH-Schritt kostet weiterhin Millisekunden.
+Für echte Echtzeit die Physikauflösung auf *mittel* oder *grob* stellen — das
+senkt die Partikelzahl und vergrößert den Zeitschritt und wirkt damit stärker als
+jede Mikrooptimierung. Die Anzeige „Simulation / Realzeit“ zeigt weiterhin
+ehrlich, wie weit die Simulationszeit hinter der Uhr liegt; es gibt keine
+künstlichen Zeitsprünge.
 
 ## Physikalisches Modell und ehrliche Grenzen
 
@@ -88,12 +133,13 @@ als Bibliothek.
 
 Tests decken paarweise Impulserhaltung bei unterschiedlichen Massen, freien Fall,
 begrenzten Dammbruch-Stabilitätslauf, selektive Zündung und Kühlung, Pause,
-Überlappungsvermeidung sowie Hindernisse und Entfernen ab. Sie ersetzen keine
+Überlappungsvermeidung, Hindernisse und Entfernen, das Vorzeichen der Druckkraft,
+den Auflösungswechsel sowie das binäre Übertragungsformat ab. Sie ersetzen keine
 Konvergenzstudie oder experimentelle Validierung.
 
 ## Dateien
 
-- `app.py`: lokaler HTTP-Server, Eingabevalidierung, Simulationssteuerung.
+- `app.py`: lokaler HTTP-Server, Eingabevalidierung, Simulationsthread.
 - `physics.py`: Python/NumPy-Solver, optional SciPy-Nachbarsuche.
 - `web/`: HTML5-Oberfläche, CSS und Canvas-Zeichnung.
 - `test_physics.py`: numerische Regressionstests.
@@ -108,11 +154,12 @@ Kontur und Beleuchtung. Die Temperaturansicht nutzt denselben Oberflächenpass.
 Die Partikelansicht zeichnet kleinere, geglättete Punkt-Sprites direkt per WebGL.
 Hindernisse, Raster und Pinsel werden ebenfalls per Shader dargestellt.
 
-Der physikalische Teilchenabstand ist gegenüber der ersten Version um 40 %
-reduziert (2,5 auf 1,5 cm). Der sichtbare Radius im Partikelmodus beträgt 3,9 mm
-statt 8 mm. Die höhere physikalische Auflösung kostet CPU-Zeit; WebGL beschleunigt
-die Darstellung, nicht den Python-Solver. Die Oberfläche bleibt eine visuelle
-Rekonstruktion, keine zusätzliche physikalische Berechnung. Verlust und
+Der Teilchenabstand ist einstellbar (1,5 / 2,0 / 2,6 cm); der Kernelradius folgt
+mit dem Faktor 2,5. WebGL beschleunigt die Darstellung, nicht den Python-Solver.
+Die Oberfläche bleibt eine visuelle Rekonstruktion, keine zusätzliche
+physikalische Berechnung. Zwischen zwei Solver-Frames interpoliert der Browser
+die Partikelpositionen linear; das ist Darstellungsglättung, kein Rechenschritt.
+Bei Partikelzu- oder -abgang wird nicht interpoliert. Verlust und
 Wiederherstellung des WebGL-Kontexts werden behandelt.
 
 API-Hintergrund: https://developer.mozilla.org/en-US/docs/Web/API/WebGL2RenderingContext

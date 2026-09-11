@@ -21,6 +21,10 @@
 <div class="eyebrow section">03 / UMGEBUNG</div>
 <label>Schwerkraft <output id="gravityValue">9.81 m/s²</output><input id="gravity" type="range" min="0" max="20" step="0.01" value="9.81"></label>
 <label>Darstellung<select id="view"><option value="fluid">Flüssigkeit · WebGL</option><option value="particles">Partikel</option><option value="thermal">Temperatur</option></select></label>
+<div class="eyebrow section">04 / LEISTUNG</div>
+<label>Physikauflösung<select id="resolution"><option value="fein">Fein · 1,5 cm</option><option value="mittel">Mittel · 2,0 cm</option><option value="grob">Grob · 2,6 cm</option></select></label>
+<label>Bildschärfe<select id="quality"><option value="1">Voll</option><option value="0.75">Reduziert</option><option value="0.55">Sparsam</option></select></label>
+<p class="intro hint">Gröbere Physikauflösung kostet Detail und bringt den größten Geschwindigkeitsgewinn. Sie startet die gewählte Szene neu.</p>
 </aside>
 <section class="workspace">
 <div class="toolbar"><div><div class="eyebrow">EXPERIMENT / 2D</div><h2>Freie Strömung</h2></div><div class="actions"><button id="pause">Ⅱ Pause</button><button id="single" title="Ein Simulationsschritt">Einzelschritt</button><button id="clear">Leeren</button></div></div>

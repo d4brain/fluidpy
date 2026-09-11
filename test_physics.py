@@ -55,6 +55,42 @@ class PhysicsTests(unittest.TestCase):
         s.advance(.01)
         self.assertFalse(s.burning.any())
 
+    def test_pressure_pushes_compressed_neighbours_apart(self):
+        # Regression guard for the sign of the pressure and cohesion terms:
+        # particles closer than the reference spacing must repel, not collapse.
+        s = Simulation()
+        s.gravity = 0
+        block = np.arange(-2, 3)*s.spacing*.6
+        gx, gy = np.meshgrid(block+.9, block+.55)
+        s.pos = np.column_stack((gx.ravel(), gy.ravel()))
+        s.vel = np.zeros_like(s.pos)
+        s.kind = np.zeros(len(s.pos), dtype=int)
+        s.temp = np.full(len(s.pos), 20.)
+        s.fuel = np.ones(len(s.pos))
+        s.burning = np.zeros(len(s.pos), dtype=bool)
+        spread = np.std(s.pos, axis=0).sum()
+        s.advance(.02)
+        self.assertGreater(np.std(s.pos, axis=0).sum(), spread)
+
+    def test_resolution_switch_rebuilds_scene(self):
+        s = Simulation()
+        s.scene('dam')
+        fine = len(s.pos)
+        s.set_resolution('grob')
+        self.assertLess(len(s.pos), fine)
+        self.assertAlmostEqual(s.h, s.spacing*2.5)
+        s.advance()
+        self.assertTrue(np.isfinite(s.pos).all())
+
+    def test_packed_payload_matches_particle_count(self):
+        s = Simulation()
+        s.scene('layers')
+        raw = s.packed()
+        self.assertEqual(len(raw), len(s.pos)*5*4)
+        values = np.frombuffer(raw, dtype=np.float32).reshape(-1, 5)
+        np.testing.assert_allclose(values[:, 0], s.pos[:, 0], atol=1e-5)
+        self.assertEqual(s.meta()['count'], len(s.pos))
+
     def test_pause_and_overlap_prevention(self):
         s = Simulation()
         self.assertGreater(s.emit(.5, .5), 0)
