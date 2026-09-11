@@ -31,6 +31,119 @@ Anderer Port: `python app.py --port 8766`. Ohne automatisches Browserfenster:
 Browser-Tabs; nur einen aktiven Tab verwenden. Ohne pollenden Tab pausiert die
 Simulationszeit.
 
+## Dauerbetrieb (pm2, systemd, Reverse Proxy)
+
+`python app.py --no-browser` startet ohne Browserfenster. Der Server bindet
+standardmäßig nur an 127.0.0.1; `--host` ändert das, macht die Simulation aber
+ohne Authentifizierung im Netz erreichbar. Für externen Zugriff gehört ein
+Reverse Proxy davor.
+
+Host und Port lassen sich auch über `FLUIDPY_HOST` und `FLUIDPY_PORT` setzen —
+so ändert ein Prozessmanager die Bindung mit einem einfachen Neustart, ohne mit
+neuen Kommandozeilenargumenten neu angelegt zu werden:
+
+```bash
+FLUIDPY_HOST=0.0.0.0 pm2 restart fluid-server --update-env
+```
+
+Kommandozeilenargumente haben Vorrang vor der Umgebung.
+
+**Läuft der Reverse Proxy in einem Container**, muss die Bindung 0.0.0.0 sein:
+`host.docker.internal` zeigt auf die Docker-Bridge des Hosts, nicht auf dessen
+Loopback. Ein an 127.0.0.1 gebundener Prozess ist von dort nicht erreichbar und
+ergibt 502. Port dann in der Host-Firewall von außen sperren.
+
+`GET /api/health` liefert Version, Bindeadresse, Nachbarsuche und Rechenzeit —
+damit ist ohne Rätselraten feststellbar, was tatsächlich läuft:
+
+```bash
+curl -s localhost:8765/api/health
+# {"version": "2.0", "particles": 1248, "frame": 812, "compute_ms": 22.9,
+#  "bind": "0.0.0.0:8765", "neighbours": "scipy"}
+```
+
+Dieselben Angaben stehen beim Start im Log:
+
+```
+FluidPy 2.0: http://127.0.0.1:8765
+Bindung: 0.0.0.0:8765 · auf allen Adressen erreichbar, Firewall beachten · Nachbarsuche: SciPy
+```
+
+Steht dort `nur lokal, aus einem Docker-Container NICHT erreichbar`, kann ein
+Reverse Proxy im Container den Prozess nicht erreichen — das ergibt 502.
+
+nginx muss den Frame-Stream durchreichen statt ihn zu puffern. Der Server sendet
+dafür `X-Accel-Buffering: no`; zusätzlich:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_read_timeout 180s;
+}
+```
+
+Wird der Stream trotzdem verschluckt, merkt der Client das nach zwei Versuchen
+und fällt selbsttätig auf Einzelabfragen zurück — langsamer, aber funktionsfähig.
+
+Abgebrochene Verbindungen — Tab geschlossen, Seite neu geladen, Navigation
+während einer laufenden Antwort — werden abgefangen, statt als
+`BrokenPipeError`-Traceback im Log zu landen. Die Same-Origin-Prüfung vergleicht
+ohne Schema, damit die Anwendung hinter einem TLS-Proxy funktioniert; fremde
+Origins werden weiterhin mit 403 abgewiesen. Ohne verbundenen Client pausiert
+der Simulationsthread und verbraucht keine CPU.
+
+**Ein Server, ein Becken.** Die Simulation ist global: alle gleichzeitigen
+Besucher teilen sich dasselbe Becken, dieselben 5000 Partikel und denselben
+Solver-Thread. Für eine öffentliche Adresse ist das eine bewusste Eigenschaft,
+kein Mehrbenutzerbetrieb — mehr Besucher machen die Simulation nicht langsamer
+pro Person, sie greifen aber alle in dieselbe Flüssigkeit.
+
+## Docker
+
+```bash
+docker compose up -d --build
+curl -s localhost:8765/api/health     # {"version": "2.0", ...}
+docker compose logs -f
+```
+
+Das Abbild enthält NumPy und SciPy; eine Build-Toolchain ist nicht nötig, beide
+kommen als fertige Wheels. Der Prozess läuft unprivilegiert (UID 10001) mit
+schreibgeschütztem Dateisystem, ohne Capabilities und mit `no-new-privileges`.
+
+Der Port wird bewusst nur an `127.0.0.1` des Hosts veröffentlicht — davor gehört
+der Reverse Proxy aus dem vorigen Abschnitt. `"8765:8765"` ohne das führende
+`127.0.0.1` würde die Simulation ohne Authentifizierung ins Netz stellen und die
+Firewall des Hosts umgehen. Anderer Host-Port: `FLUIDPY_PORT=9000 docker compose up -d`.
+
+Der Healthcheck fragt `/api/health` ab, ohne die Simulation aufzuwecken; eine
+Instanz ohne Besucher bleibt also pausiert und gilt trotzdem als gesund.
+`SIGTERM` fährt den Listener geordnet herunter, der Container stoppt in unter
+einer Sekunde. Das Container-Log ist auf 3 × 10 MB begrenzt.
+
+Docker ersetzt pm2 — nicht beides gleichzeitig auf denselben Port laufen lassen,
+sonst belegt der alte Prozess ihn und der Container startet nicht.
+
+### Traefik
+
+`docker-compose.traefik.yml` veröffentlicht `https://fluid.occdn.com` über einen
+nginx-Sidecar, der auf den FluidPy-Prozess des Hosts durchreicht. Zwei Punkte
+entscheiden dabei über Funktion oder Fehlersuche:
+
+- **Bindeadresse.** `host.docker.internal` zeigt auf die Docker-Bridge des
+  Hosts, nicht auf dessen Loopback. Ein an 127.0.0.1 gebundener Prozess ist aus
+  dem Container nicht erreichbar und liefert 502. Also
+  `--host 0.0.0.0` starten und Port 8765 in der Host-Firewall von außen sperren.
+- **`proxy_buffering off`.** Ohne das hält nginx die lange chunked-Antwort
+  zurück und im Browser bewegt sich nichts.
+
+Läuft FluidPy selbst als Container, entfällt der Sidecar: dann bekommt der
+FluidPy-Container die Traefik-Labels direkt, mit
+`loadbalancer.server.port=8765`.
+
 ## Bedienung
 
 - Material wählen und **linke Maustaste gedrückt halten**: Flüssigkeit erzeugen.
@@ -54,12 +167,26 @@ erzeugte das Ruckeln. Geändert wurde:
   veröffentlicht Frames; der Browser zeichnet unabhängig davon mit 60 Hz und
   **interpoliert zwischen den beiden letzten Frames**. Auch wenn der Solver nur
   30-mal pro Sekunde liefert, bleibt die Darstellung flüssig.
-- **Binärer Transport.** Partikel werden als rohes float32 (20 Byte pro Partikel)
-  übertragen statt als JSON. Bei 5000 Partikeln entfallen damit rund 150 kB Text
-  pro Frame sowie das Serialisieren und Parsen.
-- **Direkter GPU-Upload.** Der Renderer schiebt den empfangenen Puffer ohne
-  JavaScript-Schleife pro Partikel in den Vertexbuffer; Materialfarben liegen als
-  Uniform-Palette im Shader. Der Dichtepass rendert mit 55 % Auflösung, weil ihn
+- **Ein Stream statt Dutzender Anfragen pro Sekunde.** Eine einzige lange
+  Antwort (`GET /api/stream`, chunked) trägt alle Frames. Anfragen entstehen nur
+  noch durch Eingaben: im Leerlauf null, beim Ziehen rund 20 pro Sekunde. Eine
+  komplette Sitzung inklusive Zeichnen, Zünden und Rühren kostet etwa 100
+  HTTP-Anfragen statt mehrerer Tausend — das ist der Unterschied zwischen „läuft
+  hinter nginx“ und „Bad Gateway“.
+- **Kompaktes Binärformat.** 8 Byte pro Partikel: Position und Temperatur als
+  uint16, Material und Brennzustand als uint8. Die Positionsauflösung beträgt
+  27 µm auf 1,8 m, also ein Fünfhundertstel des Partikelabstands. Gegenüber JSON
+  ist das etwa ein Fünfzehntel der Datenmenge, gegenüber float32 ein Zweieinhalbstel.
+- **Eingaben warten nicht auf den Solver.** Werkzeugbefehle gehen in eine eigene
+  Warteschlange mit eigener Sperre. Vorher hielt ein Simulationsschritt bei 5000
+  Partikeln die Sperre rund 100 ms und ließ Zeiger-Anfragen praktisch verhungern:
+  Rühren und Zeichnen kamen bei voller Füllung gar nicht mehr an.
+- **Gedeckelte Bildrate.** Der Solver rechnet mit 1/120 s Schrittweite, sendet
+  aber höchstens 40 Frames pro Sekunde — mehr bringt neben der Interpolation
+  nichts. Gemessen: 340 kB/s bei 1248 Partikeln, 160 kB/s bei grober Auflösung.
+- **Direkter GPU-Upload.** Der empfangene Puffer geht ohne JavaScript-Schleife
+  pro Partikel in den Vertexbuffer; die GPU liest das uint16/uint8-Format direkt
+  als normalisierte Attribute, Materialfarben liegen als Uniform-Palette im Shader. Der Dichtepass rendert mit 55 % Auflösung, weil ihn
   der Oberflächenpass ohnehin filtert. Die Gerätepixelrate ist auf 1,5 begrenzt.
 - **Schnellerer Solver, gleiche Physik.** Strukturierte 1-D-Arrays statt
   (n, 2)-Zugriffen, zusammengefasste Kraftterme, aus den Materialpaaren
@@ -139,11 +266,13 @@ Konvergenzstudie oder experimentelle Validierung.
 
 ## Dateien
 
-- `app.py`: lokaler HTTP-Server, Eingabevalidierung, Simulationsthread.
+- `app.py`: HTTP-Server, Eingabevalidierung, Simulationsthread, Frame-Stream.
 - `physics.py`: Python/NumPy-Solver, optional SciPy-Nachbarsuche.
 - `web/`: HTML5-Oberfläche, CSS und Canvas-Zeichnung.
 - `test_physics.py`: numerische Regressionstests.
 - `start.bat`: Windows-Start mit isolierter Python-Umgebung.
+- `Dockerfile`, `docker-compose.yml`: Containerbetrieb hinter einem Reverse Proxy.
+- `docker-compose.traefik.yml`: Veröffentlichung von fluid.occdn.com über Traefik.
 
 ## WebGL-Darstellung
 

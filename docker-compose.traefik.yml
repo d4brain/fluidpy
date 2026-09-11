@@ -1,0 +1,79 @@
+# FluidPy hinter Traefik: nginx-Sidecar reicht auf den Host-Prozess durch.
+# Entspricht dem goldinger-Muster, angepasst auf fluid.occdn.com und Port 8765.
+#
+# Voraussetzung: FluidPy muss auf dem Host an einer Adresse lauschen, die der
+# Container über host.docker.internal erreicht. 127.0.0.1 reicht NICHT —
+# host-gateway zeigt auf die Docker-Bridge des Hosts, nicht auf dessen Loopback.
+#   python app.py --no-browser --host 0.0.0.0 --port 8765
+# und den Port 8765 in der Host-Firewall von außen sperren.
+services:
+  fluid:
+    image: 'nginx:alpine'
+    restart: unless-stopped
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    expose:
+      - '80'
+    healthcheck:
+      disable: true
+    labels:
+      - traefik.enable=true
+      # Muss auf das Docker-Netz dieser Anwendung zeigen, nicht auf das von goldinger.
+      - traefik.docker.network=p2t6g68wq96tuiiau90v93w0
+      - traefik.http.services.fluid-service.loadbalancer.server.port=80
+      - traefik.http.services.fluid-service.loadbalancer.server.scheme=http
+      - traefik.http.routers.fluid-http.rule=Host(`fluid.occdn.com`)
+      - traefik.http.routers.fluid-http.entrypoints=http
+      - traefik.http.routers.fluid-http.priority=1000
+      - traefik.http.routers.fluid-http.middlewares=fluid-https-redirect
+      - traefik.http.routers.fluid-http.service=fluid-service
+      - traefik.http.middlewares.fluid-https-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.fluid-https-redirect.redirectscheme.permanent=true
+      - traefik.http.routers.fluid-https.rule=Host(`fluid.occdn.com`)
+      - traefik.http.routers.fluid-https.entrypoints=https
+      - traefik.http.routers.fluid-https.priority=1000
+      - traefik.http.routers.fluid-https.tls=true
+      - traefik.http.routers.fluid-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.fluid-https.service=fluid-service
+    command:
+      - /bin/sh
+      - '-c'
+      - |-
+        cat > /etc/nginx/conf.d/default.conf <<'EOF'
+        server {
+          listen 80;
+          server_name _;
+
+          # Die Anfragen sind winzig: Befehle und Zeigerpositionen als JSON.
+          client_max_body_size 1m;
+
+          location / {
+            proxy_pass http://host.docker.internal:8765;
+            proxy_http_version 1.1;
+
+            # Host unverändert durchreichen: die Same-Origin-Prüfung von FluidPy
+            # vergleicht den Origin-Header damit.
+            proxy_set_header Host $$host;
+            proxy_set_header X-Real-IP $$remote_addr;
+            proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+
+            # Kein WebSocket. Leerer Connection-Header aktiviert Keep-Alive zum
+            # Upstream; ein vorgetäuschtes "upgrade" wäre hier schlicht falsch.
+            proxy_set_header Connection "";
+
+            # Entscheidend: FluidPy liefert die Frames als eine lange
+            # chunked-Antwort. Gepuffert käme davon minutenlang nichts an.
+            proxy_buffering off;
+            proxy_request_buffering off;
+            gzip off;
+
+            # Ein Stream-Fenster dauert 120 s und wird danach sauber beendet.
+            proxy_connect_timeout 30s;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+          }
+        }
+        EOF
+
+        exec nginx -g 'daemon off;'

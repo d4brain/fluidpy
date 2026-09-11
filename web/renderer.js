@@ -32,10 +32,10 @@ class FluidRenderer {
    layout(location=1) in float material;
    layout(location=2) in float temperature;
    layout(location=3) in float burning;
-   uniform vec2 world; uniform float pixelsPerMeter; uniform float radius; uniform vec3 palette[32];
+   uniform float pixelsPerMeter; uniform float radius; uniform vec3 palette[32]; uniform float tempScale;
    out vec3 tint; out float heat; out float fire;
-   void main(){gl_Position=vec4(position/world*2.0-1.0,0,1);gl_PointSize=2.0*radius*pixelsPerMeter;
-    tint=palette[int(clamp(material,0.0,31.0))];heat=temperature;fire=burning;}
+   void main(){gl_Position=vec4(position*2.0-1.0,0,1);gl_PointSize=2.0*radius*pixelsPerMeter;
+    tint=palette[int(clamp(material,0.0,31.0))];heat=temperature*tempScale;fire=burning;}
   `,`#version 300 es
    precision highp float;
    in vec3 tint; in float heat; in float fire;
@@ -81,8 +81,12 @@ class FluidRenderer {
   this.palette=new Float32Array(96);
   this.vao=g.createVertexArray();g.bindVertexArray(this.vao);
   this.buffer=g.createBuffer();g.bindBuffer(g.ARRAY_BUFFER,this.buffer);
-  // Interleaved float32 from the server: x, y, material, temperature, burning.
-  for(const [loc,size,offset] of [[0,2,0],[1,1,8],[2,1,12],[3,1,16]]){g.enableVertexAttribArray(loc);g.vertexAttribPointer(loc,size,g.FLOAT,false,20,offset);}
+  // Server layout, 8 bytes: uint16 x, uint16 y, uint16 temp, uint8 kind, uint8 burning.
+  // Positions and temperature arrive normalised; the shader scales them back.
+  for(const [loc,size,type,normalized,offset] of [
+   [0,2,g.UNSIGNED_SHORT,true,0],[2,1,g.UNSIGNED_SHORT,true,4],
+   [1,1,g.UNSIGNED_BYTE,false,6],[3,1,g.UNSIGNED_BYTE,true,7]]){
+   g.enableVertexAttribArray(loc);g.vertexAttribPointer(loc,size,type,normalized,8,offset);}
   g.bindVertexArray(null);this.emptyVao=g.createVertexArray();
   this.capacity=0;
   this.texture=g.createTexture();g.bindTexture(g.TEXTURE_2D,this.texture);
@@ -110,16 +114,16 @@ class FluidRenderer {
   materials.slice(0,32).forEach((m,i)=>{for(let k=0;k<3;k++)this.palette[i*3+k]=parseInt(m.color.slice(1+k*2,3+k*2),16)/255;});
   const g=this.gl;g.useProgram(this.splat);g.uniform3fv(this.u(this.splat,'palette[0]'),this.palette);
  }
- // buffer: Float32Array with five values per particle, already interpolated.
+ // buffer: Uint8Array in the server's 8-byte layout, already interpolated.
  upload(buffer,count,stamp){
   if(stamp===this.stamp)return;this.stamp=stamp;this.count=count;
-  const g=this.gl;g.bindBuffer(g.ARRAY_BUFFER,this.buffer);
-  if(buffer.length>this.capacity){this.capacity=buffer.length+4096;g.bufferData(g.ARRAY_BUFFER,this.capacity*4,g.DYNAMIC_DRAW);}
-  g.bufferSubData(g.ARRAY_BUFFER,0,buffer,0,count*5);
+  const bytes=count*8,g=this.gl;g.bindBuffer(g.ARRAY_BUFFER,this.buffer);
+  if(bytes>this.capacity){this.capacity=bytes+8192;g.bufferData(g.ARRAY_BUFFER,this.capacity,g.DYNAMIC_DRAW);}
+  if(bytes)g.bufferSubData(g.ARRAY_BUFFER,0,buffer,0,bytes);
  }
  particles(state,mode){
   const g=this.gl,p=this.splat;g.useProgram(p);g.bindVertexArray(this.vao);
-  g.uniform2f(this.u(p,'world'),1.8,1.1);
+  g.uniform1f(this.u(p,'tempScale'),65535/40);
   g.uniform1f(this.u(p,'pixelsPerMeter'),(mode===1?this.canvas.width:this.fieldWidth)/1.8);
   g.uniform1f(this.u(p,'radius'),(state?.spacing||.015)*(mode===1?.26:1.5));g.uniform1i(this.u(p,'mode'),mode);
   g.drawArrays(g.POINTS,0,this.count);

@@ -6,6 +6,8 @@ let state=null,kind=0,tool='emit',pointer=null,cursor=null,last=null,commands=[]
 // Two most recent solver frames; rendering interpolates between them so the
 // picture stays smooth even when the Python solver publishes below 60 Hz.
 let prev=null,curr=null,interval=16,blend=null,stamp=0,shownFrame=-1,shownAlpha=-1,sentGravity=null,rate=1;
+// Commands are queued on the server, so a response can still predate them.
+let pendingMaterials=-1,pendingResolution=null;
 
 let materialCount=-1;
 function materialUI(){
@@ -39,10 +41,12 @@ canvas.onpointerleave=()=>{if(!pointer)cursor=null;};
 document.addEventListener('visibilitychange',()=>{pointer=null;last=null;});
 new ResizeObserver(()=>{if(renderer)renderer.resize(+$('quality').value);}).observe(canvas);
 
+const STRIDE=8;
 function decode(buffer){
  const view=new DataView(buffer),length=view.getUint32(0,true);
  const meta=JSON.parse(new TextDecoder().decode(new Uint8Array(buffer,4,length)));
- return{meta,data:new Float32Array(buffer,4+length,meta.count*5)};
+ return{meta,bytes:new Uint8Array(buffer,4+length,meta.count*STRIDE),
+        shorts:new Uint16Array(buffer,4+length,meta.count*STRIDE/2)};
 }
 function accept(frame){
  if(curr&&frame.meta.frame===curr.meta.frame)return;
@@ -52,17 +56,29 @@ function accept(frame){
   prev=curr;}
  frame.at=now;curr=frame;if(!prev)prev=frame;
  state=frame.meta;
- if(state.count>0&&(!blend||blend.length<state.count*5))blend=new Float32Array(state.count*5+2048);
+ // Select the new material only once the server actually reports it.
+ if(pendingMaterials>=0&&state.materials.length>pendingMaterials){kind=state.materials.length-1;pendingMaterials=-1;}
+ if(kind>=state.materials.length)kind=state.materials.length-1;
+ if(pendingResolution&&state.resolution===pendingResolution)pendingResolution=null;
+ if(!pendingResolution&&$('resolution').value!==state.resolution)$('resolution').value=state.resolution;
+ if(state.count>0&&(!blend||blend.bytes.length<state.count*STRIDE)){
+  const room=new ArrayBuffer(state.count*STRIDE+4096);
+  blend={bytes:new Uint8Array(room),shorts:new Uint16Array(room)};
+ }
 }
 // Rendering: pick the geometry for "now" between the last two solver frames.
 function geometry(){
  const a=prev,b=curr;
  if(!b)return null;
  let alpha=Math.max(0,Math.min(1,(performance.now()-b.at)/Math.max(interval,1)));
- if(!b.meta.count||a===b||a.meta.topology!==b.meta.topology||a.meta.count!==b.meta.count||b.meta.paused)return{data:b.data,count:b.meta.count,key:b.meta.frame*2};
- const n=b.meta.count*5,src=a.data,dst=b.data,out=blend;
- for(let k=0;k<n;k++)out[k]=src[k]+(dst[k]-src[k])*alpha;
- return{data:out,count:b.meta.count,key:b.meta.frame*2+1,alpha};
+ if(!b.meta.count||a===b||a.meta.topology!==b.meta.topology||a.meta.count!==b.meta.count||b.meta.paused)
+  return{data:b.bytes,count:b.meta.count,key:b.meta.frame*2};
+ // Material and burning flag come from the newer frame; position and
+ // temperature are the interpolated uint16 triples.
+ blend.bytes.set(b.bytes);
+ const n=b.meta.count*4,src=a.shorts,dst=b.shorts,out=blend.shorts;
+ for(let k=0;k<n;k+=4)for(let c=0;c<3;c++)out[k+c]=src[k+c]+(dst[k+c]-src[k+c])*alpha;
+ return{data:blend.bytes,count:b.meta.count,key:b.meta.frame*2+1,alpha};
 }
 function draw(){
  requestAnimationFrame(draw);
@@ -72,8 +88,12 @@ function draw(){
  renderer.draw(state,$('view').value,cursor,+$('radius').value/100);
  $('rendererInfo').textContent=renderer.lost?'WEBGL UNTERBROCHEN':'WEBGL 2 · GPU';
 }
-function readout(){
+let lastReadout=0;
+function readout(force){
  if(!state)return;
+ const now=performance.now();
+ if(!force&&now-lastReadout<100)return;          // the panel does not need 120 Hz
+ lastReadout=now;
  materialUI();$('pause').textContent=state.paused?'▶ Fortsetzen':'Ⅱ Pause';
  $('count').innerHTML=state.count+' <small>/ '+state.limit+'</small>';
  $('time').innerHTML=state.time.toFixed(2)+' <small>s</small>';
@@ -82,26 +102,77 @@ function readout(){
  $('status').textContent=state.count>=state.limit?'PARTIKELLIMIT ERREICHT':state.paused?'PAUSIERT · WERKZEUGE AKTIV':
   state.hot?state.hot+' BRENNENDE PARTIKEL':'SPH AKTIV · '+state.compute_ms+' ms / SCHRITT · '+Math.round(1000/Math.max(state.interval_ms,.1))+' SCHRITTE/S';
 }
-// Network loop: independent of rendering, at most one request in flight.
-async function poll(){
+function nextBody(){
+ const cmd=commands.shift();
+ if(cmd){sentGravity=+$('gravity').value;const body={...cmd,gravity:sentGravity};if(cmd.action===null)delete body.action;return{cmd,body};}
+ if(pointer){sentGravity=+$('gravity').value;
+  const body={gravity:sentGravity,pointer:{...pointer,...brush(),dx:pointer.x-(last?.x??pointer.x),dy:pointer.y-(last?.y??pointer.y)}};
+  last={...pointer};return{cmd:null,body};}
+ if(+$('gravity').value!==sentGravity){sentGravity=+$('gravity').value;return{cmd:null,body:{gravity:sentGravity}};}
+ return null;
+}
+function applied(cmd){
+ if(cmd?.action==='material')pendingMaterials=materialCount;
+ if(cmd?.action==='resolution')pendingResolution=cmd.resolution;
+}
+function fail(error){$('status').textContent='FEHLER: '+error.message+' · Python-Server prüfen';}
+// Input loop: one request per command or pointer sample, never per rendered
+// frame. Idle means no requests at all — the stream below carries the frames.
+async function input(){
  for(;;){
   const started=performance.now();
-  const cmd=commands.shift();
-  let body=null;
-  if(cmd){sentGravity=+$('gravity').value;body={...cmd,gravity:sentGravity};if(cmd.action===null)delete body.action;}
-  else if(+$('gravity').value!==sentGravity&&!pointer){sentGravity=+$('gravity').value;body={gravity:sentGravity};}
-  else if(pointer){sentGravity=+$('gravity').value;body={gravity:sentGravity,pointer:{...pointer,...brush(),dx:pointer.x-(last?.x??pointer.x),dy:pointer.y-(last?.y??pointer.y)}};last={...pointer};}
-  try{
-   const response=await fetch('/api/step',body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}
-                                         :{method:'POST',headers:{'Content-Type':'application/json'}});
-   if(!response.ok){const error=await response.json().catch(()=>({}));throw Error(error.error||'Serverfehler');}
-   accept(decode(await response.arrayBuffer()));
-   if(cmd?.action==='material')kind=state.materials.length-1;
-   if(cmd?.action==='resolution')$('resolution').value=state.resolution;
-   readout();
-  }catch(error){$('status').textContent='FEHLER: '+error.message+' · Python-Server prüfen';await new Promise(r=>setTimeout(r,400));}
-  const wait=commands.length?0:Math.max(0,12-(performance.now()-started));
-  await new Promise(r=>setTimeout(r,wait));
+  const next=nextBody();
+  if(next){
+   try{
+    const response=await fetch('/api/step',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(next.body)});
+    if(!response.ok){const error=await response.json().catch(()=>({}));throw Error(error.error||'Serverfehler');}
+    accept(decode(await response.arrayBuffer()));applied(next.cmd);readout(true);
+   }catch(error){fail(error);await new Promise(r=>setTimeout(r,400));}
+  }
+  // Pointer drags sample at 40 Hz; idle costs no requests at all.
+  const budget=commands.length?0:(pointer?25:60),rest=budget-(performance.now()-started);
+  await new Promise(r=>setTimeout(r,rest>0?rest:0));
  }
 }
-if(renderer){renderer.resize(+$('quality').value);draw();poll();}
+// Frame loop: a single long-lived chunked response carries every solver frame,
+// so a proxy in front of this server sees one connection instead of dozens of
+// requests per second. If a proxy buffers the stream away, fall back to polling.
+async function stream(){
+ let streaming=true,failures=0;
+ for(;;){
+  if(streaming){
+   let got=0;
+   try{
+    const response=await fetch('/api/stream',{headers:{'Accept':'application/octet-stream'}});
+    if(!response.ok||!response.body)throw Error('Stream nicht verfügbar');
+    const reader=response.body.getReader();
+    let buffer=new Uint8Array(0);
+    for(;;){
+     const {done,value}=await reader.read();
+     if(done)break;
+     const merged=new Uint8Array(buffer.length+value.length);
+     merged.set(buffer);merged.set(value,buffer.length);buffer=merged;
+     for(;;){
+      if(buffer.length<4)break;
+      const size=new DataView(buffer.buffer,buffer.byteOffset,4).getUint32(0,true);
+      if(buffer.length<4+size)break;
+      accept(decode(buffer.slice(4,4+size).buffer));readout();got++;
+      buffer=buffer.subarray(4+size);
+     }
+    }
+   }catch(error){if(!got)failures++;}
+   if(got)failures=0;
+   // Two silent attempts mean the stream does not survive the path to here.
+   if(failures>=2){streaming=false;$('rendererInfo').textContent='WEBGL 2 · GPU';}
+   await new Promise(r=>setTimeout(r,got?0:500));
+  }else{
+   try{
+    const response=await fetch('/api/frame',{headers:{'Accept':'application/octet-stream'}});
+    if(!response.ok)throw Error('Serverfehler');
+    accept(decode(await response.arrayBuffer()));readout();
+   }catch(error){fail(error);await new Promise(r=>setTimeout(r,400));}
+   await new Promise(r=>setTimeout(r,20));
+  }
+ }
+}
+if(renderer){renderer.resize(+$('quality').value);draw();stream();input();}

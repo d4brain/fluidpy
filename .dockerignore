@@ -1,0 +1,11 @@
+.venv
+__pycache__
+*.pyc
+.git
+.gitignore
+start.bat
+test_physics.py
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore

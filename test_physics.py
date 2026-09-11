@@ -86,10 +86,15 @@ class PhysicsTests(unittest.TestCase):
         s = Simulation()
         s.scene('layers')
         raw = s.packed()
-        self.assertEqual(len(raw), len(s.pos)*5*4)
-        values = np.frombuffer(raw, dtype=np.float32).reshape(-1, 5)
-        np.testing.assert_allclose(values[:, 0], s.pos[:, 0], atol=1e-5)
+        self.assertEqual(len(raw), len(s.pos)*s.STRIDE)
+        shorts = np.frombuffer(raw, dtype=np.uint16).reshape(-1, 4)
+        octets = np.frombuffer(raw, dtype=np.uint8).reshape(-1, s.STRIDE)
+        np.testing.assert_allclose(shorts[:, 0]*(s.width/65535), s.pos[:, 0], atol=1e-4)
+        np.testing.assert_allclose(shorts[:, 1]*(s.height/65535), s.pos[:, 1], atol=1e-4)
+        np.testing.assert_allclose(shorts[:, 2]/s.TEMP_SCALE, s.temp, atol=.05)
+        np.testing.assert_array_equal(octets[:, 6], s.kind)
         self.assertEqual(s.meta()['count'], len(s.pos))
+        self.assertEqual(s.meta()['stride'], s.STRIDE)
 
     def test_pause_and_overlap_prevention(self):
         s = Simulation()

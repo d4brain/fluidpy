@@ -378,23 +378,33 @@ class Simulation:
 
     # ------------------------------------------------------------- output
 
+    def count(self):
+        return len(self.pos)
+
+    # Wire format: 8 bytes per particle instead of 20 floats-as-float32.
+    # x, y and temperature are quantised to uint16, which is far finer than the
+    # particle spacing (27 µm over 1.8 m) and invisible after interpolation.
+    STRIDE = 8
+    TEMP_SCALE = 40.            # 0 … 1638 °C in 0.025 °C steps
+
     def packed(self):
-        """Particle payload as interleaved float32: x, y, kind, temp, burning."""
+        """Particle payload: uint16 x, uint16 y, uint16 temp, uint8 kind, uint8 burning."""
         n = len(self.pos)
-        out = np.empty((n, 5), dtype=np.float32)
+        out = np.zeros((n, self.STRIDE), dtype=np.uint8)
         if n:
-            out[:, 0] = self.pos[:, 0]
-            out[:, 1] = self.pos[:, 1]
-            out[:, 2] = self.kind
-            out[:, 3] = self.temp
-            out[:, 4] = self.burning
+            shorts = out.view(np.uint16).reshape(n, self.STRIDE//2)
+            shorts[:, 0] = np.clip(self.pos[:, 0]*(65535/self.width), 0, 65535)
+            shorts[:, 1] = np.clip(self.pos[:, 1]*(65535/self.height), 0, 65535)
+            shorts[:, 2] = np.clip(self.temp*self.TEMP_SCALE, 0, 65535)
+            out[:, 6] = np.minimum(self.kind, 255)
+            out[:, 7] = self.burning*255
         return out.tobytes()
 
     def meta(self):
         return {'time': round(self.time, 3), 'paused': self.paused, 'count': len(self.pos),
                 'limit': self.limit, 'obstacles': self.obstacles, 'width': self.width,
                 'height': self.height, 'spacing': self.spacing, 'resolution': self.resolution,
-                'topology': self.topology, 'substeps': self.substeps,
+                'topology': self.topology, 'substeps': self.substeps, 'stride': self.STRIDE,
                 'materials': [asdict(m) for m in self.materials],
                 'hot': int(np.sum(self.burning)),
                 'temperature': round(float(np.mean(self.temp)), 1) if len(self.temp) else 20}

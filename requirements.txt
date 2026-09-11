@@ -1,2 +1,3 @@
 numpy>=1.24,<3
-# Optional accelerator: pip install scipy
+# Empfohlen, im Docker-Abbild fest enthalten: halbiert die Nachbarsuche.
+# pip install scipy

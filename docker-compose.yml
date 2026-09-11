@@ -1,0 +1,47 @@
+services:
+  fluidpy:
+    build: .
+    image: fluidpy:2.0
+    container_name: fluidpy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 5s
+
+    # Nur über den Reverse Proxy des Hosts erreichbar. "8765:8765" ohne das
+    # führende 127.0.0.1 würde die Simulation ohne Authentifizierung ins Netz
+    # stellen und die Firewall des Hosts umgehen.
+    ports:
+      - "127.0.0.1:${FLUIDPY_PORT:-8765}:8765"
+
+    # Der Prozess schreibt keine Dateien.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+
+    # Der Solver ist einkernig; ein zweiter Kern bleibt für HTTP und Stream.
+    # Bei 5000 Partikeln liegt der Speicherbedarf inklusive NumPy und SciPy
+    # deutlich unter 512 MB.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+
+    # /api/health antwortet ohne die Simulation aufzuwecken: eine pausierte
+    # Instanz ohne Besucher gilt weiterhin als gesund.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if b'version' in urllib.request.urlopen('http://127.0.0.1:8765/api/health',timeout=5).read() else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+    # Ohne Deckel wächst das Container-Log unbegrenzt.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
