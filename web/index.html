@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FluidPy · Fluidlabor</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header><div class="brand"><span class="mark">≈</span><strong>fluid<span>py</span></strong><small>INTERAKTIVES FLUIDLABOR</small></div><div class="runtime">PYTHON PHYSICS <span>↔</span> <span id="rendererInfo">WEBGL 2</span></div></header>
+<main>
+<aside>
+<div class="eyebrow">01 / MATERIAL</div><h1>Was fließt?</h1><p class="intro">Material wählen. Im Becken mit gedrückter linker Maustaste zeichnen.</p>
+<div id="materials" class="materials"></div>
+<div class="properties"><span>Dichte <b id="rhoInfo">998 kg/m³</b></span><span>Viskosität <b id="muInfo">0.001 Pa·s</b></span><span>Entzündbarkeit <b id="fireInfo">Nein</b></span></div>
+<details><summary>Eigenes Material mischen</summary>
+<label>Dichte <span>kg/m³</span><input id="density" type="number" min="300" max="3000" value="1100"></label>
+<label>Viskosität <span>Pa·s</span><input id="viscosity" type="number" min="0.0001" max="10" step="any" value="0.05"></label>
+<label>Entzündbarkeit <output id="flameValue">0 %</output><input id="flammability" type="range" min="0" max="1" step="0.05" value="0"></label>
+<label>Zündtemperatur <span>°C</span><input id="ignition" type="number" min="50" max="800" value="300"></label>
+<label>Kohäsion <span>Modellparameter</span><input id="cohesion" type="number" min="0" max="0.15" step="0.005" value="0.05"></label>
+<button id="create" class="wide">Material hinzufügen</button></details>
+<div class="eyebrow section">02 / WERKZEUG</div><div id="tools" class="tools">
+<button data-tool="emit" class="selected">◉ Eingießen</button><button data-tool="stir">↝ Rühren</button><button data-tool="heat">♨ Erhitzen</button><button data-tool="cool">❄ Kühlen</button><button data-tool="obstacle">● Hindernis</button><button data-tool="erase">⌫ Entfernen</button></div>
+<label>Pinselradius <output id="radiusValue">6.5 cm</output><input id="radius" type="range" min="2.5" max="16" step="0.5" value="6.5"></label>
+<label>Einfülltemperatur <output id="tempValue">20 °C</output><input id="temperature" type="range" min="0" max="800" step="10" value="20"></label>
+<div class="eyebrow section">03 / UMGEBUNG</div>
+<label>Schwerkraft <output id="gravityValue">9.81 m/s²</output><input id="gravity" type="range" min="0" max="20" step="0.01" value="9.81"></label>
+<label>Darstellung<select id="view"><option value="fluid">Flüssigkeit · WebGL</option><option value="particles">Partikel</option><option value="thermal">Temperatur</option></select></label>
+</aside>
+<section class="workspace">
+<div class="toolbar"><div><div class="eyebrow">EXPERIMENT / 2D</div><h2>Freie Strömung</h2></div><div class="actions"><button id="pause">Ⅱ Pause</button><button id="single" title="Ein Simulationsschritt">Einzelschritt</button><button id="clear">Leeren</button></div></div>
+<div class="tank" id="tank"><canvas id="canvas" aria-label="Interaktives Flüssigkeitsbecken. Linke Maustaste zum Anwenden des ausgewählten Werkzeugs.">Diese Darstellung benötigt WebGL 2.</canvas><div class="tank-top"><span id="toolLabel">◉ WASSER EINGIESSEN</span><span>1.80 × 1.10 m</span></div><div class="tank-bottom"><span id="status">Verbinde mit Python …</span><span id="scale">━━━━ 10 cm</span></div></div>
+<div class="metrics"><div><span>PARTIKEL</span><strong id="count">0 <small>/ 5000</small></strong></div><div><span>SIMULATIONSZEIT</span><strong id="time">0.00 <small>s</small></strong></div><div><span>MITTLERE TEMPERATUR</span><strong id="meanTemp">20 <small>°C</small></strong></div><div><span>SIMULATION / REALZEIT</span><strong id="speed">—</strong></div></div>
+<div class="experiments"><span>Startszene</span><button data-scene="dam">Dammbruch</button><button data-scene="layers">Wasser + Öl</button><button data-scene="empty">Leeres Becken</button></div>
+<details class="notes"><summary>Physik, Bedienung und Modellgrenzen</summary><p>Schwach kompressible SPH in Python mit variablen Partikelmassen, symmetrischen Druck- und Viskositätskräften, Schwerkraft und adaptiven Zeitschritten. Die Flüssigkeiten reagieren auf dieselbe Schwerkraft; Dichteunterschiede wirken über Masse und Druck.</p><p><b>Bedienung:</b> Linksklick halten zum Eingießen, Erhitzen, Kühlen oder Entfernen. Zum Rühren gedrückt ziehen. Hindernisse werden mit einzelnen Klicks gesetzt. Leeren entfernt auch Hindernisse. Leertaste pausiert. Eigene Materialwerte gelten für neu erzeugte Partikel.</p><p><b>Darstellung:</b> WebGL 2 berechnet eine geglättete Oberfläche aus den Partikeln. Im Partikelmodus bleiben die einzelnen, kleineren Teilchen sichtbar. Physikalischer Teilchenabstand: 1,5 cm; bis zu 5000 Partikel. Die GPU beschleunigt die Darstellung, während Python weiterhin die Physik berechnet.</p><p><b>Grenzen:</b> 2D-Echtzeitmodell, keine validierte CFD. Wände werden über Kollisionen behandelt. Kohäsion und Nichtmischbarkeit sind Näherungen. Wärmeleitung ist beschleunigt. Zündung erfolgt anhand der Temperatur und einer freien Oberfläche als Sauerstoff-Näherung. Brennstoff ist endlich; verbrauchte Partikel bleiben als Rückstand erhalten. Keine Verdampfung, Gasströmung, chemische Kinetik oder genaue Oberflächenspannung. Wasser und Sirup sind im Modell nicht brennbar. Bei hoher Last läuft die Simulationszeit langsamer als die Echtzeit.</p><p>Fachlicher Hintergrund: <a href="https://pysph.readthedocs.io/en/main/reference/equations.html" target="_blank" rel="noreferrer">SPH-Gleichungen · PySPH</a>.</p></details>
+</section></main><script src="/renderer.js"></script><script src="/app.js"></script></body></html>
