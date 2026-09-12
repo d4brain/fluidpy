@@ -5,7 +5,7 @@ import time
 import unittest
 from http.client import HTTPConnection
 from app import create_server
-from physics import PRESETS
+from physics import PRESETS, Simulation
 
 
 class HttpTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class HttpTests(unittest.TestCase):
     def decode(self, body):
         size = int.from_bytes(body[:4], 'little')
         meta = json.loads(body[4:4+size])
-        self.assertEqual(len(body)-4-size, meta['count']*8)
+        self.assertEqual(len(body)-4-size, meta['count']*Simulation.STRIDE)
         return meta, body[4+size:]
 
     def test_same_host_https_and_local_origin(self):
@@ -61,7 +61,7 @@ class HttpTests(unittest.TestCase):
                 status, body = self.request('GET', '/api/frame')
                 self.assertEqual(status, 200)
                 meta, raw = self.decode(body)
-                kinds = set(raw[6::8])
+                kinds = set(raw[6::Simulation.STRIDE])
                 if kind in kinds:
                     break
                 if time.monotonic() >= deadline:

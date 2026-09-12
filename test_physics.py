@@ -87,7 +87,7 @@ class PhysicsTests(unittest.TestCase):
         s.scene('layers')
         raw = s.packed()
         self.assertEqual(len(raw), len(s.pos)*s.STRIDE)
-        shorts = np.frombuffer(raw, dtype=np.uint16).reshape(-1, 4)
+        shorts = np.frombuffer(raw, dtype=np.uint16).reshape(-1, s.STRIDE//2)
         octets = np.frombuffer(raw, dtype=np.uint8).reshape(-1, s.STRIDE)
         np.testing.assert_allclose(shorts[:, 0]*(s.width/65535), s.pos[:, 0], atol=1e-4)
         np.testing.assert_allclose(shorts[:, 1]*(s.height/65535), s.pos[:, 1], atol=1e-4)

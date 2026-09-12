@@ -25,7 +25,7 @@ class InclusionTests(unittest.TestCase):
                     self.assertTrue(np.isfinite(s.vel).all())
                     self.assertTrue((s.pos >= 0).all())
                     self.assertTrue((s.pos <= [s.width, s.height]).all())
-                    self.assertEqual(len(s.packed()), count*8)
+                    self.assertEqual(len(s.packed()), count*Simulation.STRIDE)
                     s.set_resolution('mittel')
                     self.assertEqual(s.last_scene, name)
 
@@ -78,8 +78,8 @@ class InclusionTests(unittest.TestCase):
     def test_selection_and_custom_material(self):
         s = Simulation()
         hidden = [m.name for m in PRESETS if not m.selectable]
-        self.assertEqual(hidden, ['Speisestückchen', 'Buchstabennudeln'])
-        self.assertEqual(sum(m.selectable for m in PRESETS), len(PRESETS)-2)
+        self.assertEqual(hidden, ['Speisestückchen', 'Buchstabennudeln', 'Dampf'])
+        self.assertEqual(sum(m.selectable for m in PRESETS), len(PRESETS)-3)
         build_commands({'action':'material'})(s)
         self.assertEqual(s.materials[-1].name, 'Eigenes 1')
         s.emit(.5, .5, len(s.materials)-1)

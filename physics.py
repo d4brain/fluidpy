@@ -32,6 +32,16 @@ class Material:
     cohesion: float
     # Radiuswachstum eines Aetzlochs in m/s bei 20 C. 0 = greift nichts an.
     corrosion: float = 0.
+    # Anteil der Schwerkraft. Negativ = steigt auf (Dampf).
+    gravity_scale: float = 1.
+    # Luftwiderstand pro Sekunde; begrenzt die Steiggeschwindigkeit von Gas.
+    drag: float = 0.
+    # Zerfall pro Sekunde bei vollem Säurekontakt. 0 = säurefest.
+    dissolves: float = 0.
+    # Gasentwicklung bei Säurekontakt, relativ.
+    fizz: float = 0.
+    # Mischbar: keine abgesenkte Kohäsion gegenüber fremden Stoffen.
+    miscible: bool = False
     group: str = 'Flüssigkeiten'
     render: str = "fluid"
     selectable: bool = True
@@ -46,16 +56,19 @@ PRESETS = [
     Material('Durchfall', '#927132', 1030, .035, 0, 500, 3800, .025,
              group='Ekliges', description='Dünnflüssig, braun und leicht zäh.'),
     Material('Kot-Klumpen', '#65412b', 1080, 4, 0, 500, 2400, .12,
-             group='Ekliges', render='solid',
-             description='Zusammenhängende Klumpen, die fallen und sich drehen.'),
+             dissolves=.42, fizz=1., group='Ekliges', render='solid',
+             description='Zusammenhängende Klumpen, die fallen und sich drehen. '
+                         'In Säure lösen sie sich langsam auf und gasen dabei.'),
     Material('Erbrochenes', '#a6a044', 1020, .18, 0, 500, 3600, .045,
-             group='Ekliges', description='Zähe Flüssigkeit mit orangefarbenen Speisestückchen.'),
+             dissolves=0., fizz=1.7, group='Ekliges',
+             description='Zähe Flüssigkeit mit orangefarbenen Speisestückchen. '
+                         'In Säure schäumt sie stark, bleibt selbst aber erhalten.'),
     Material('Buchstabensuppe', '#ba5825', 1005, .008, 0, 500, 4000, .025,
              group='Ekliges', description='Rote Brühe mit hellen Nudelbuchstaben A, E, F, H, L, O, P, U.'),
     Material('Speisestückchen', '#e9ab66', 1060, 1.5, 0, 500, 2800, .10,
-             group='Ekliges', render='solid', selectable=False),
+             dissolves=.30, fizz=1.3, group='Ekliges', render='solid', selectable=False),
     Material('Buchstabennudeln', '#ffe4a0', 1040, .8, 0, 500, 2800, .10,
-             group='Ekliges', render='solid', selectable=False),
+             dissolves=.22, fizz=.5, group='Ekliges', render='solid', selectable=False),
     # ------------------------------------------------------------- Getränke
     Material('Kaffee', '#4b2a17', 1002, .0013, 0, 500, 4050, .062,
              group='Getränke',
@@ -63,6 +76,15 @@ PRESETS = [
     Material('Cola', '#2d150c', 1044, .0017, 0, 500, 3800, .055,
              group='Getränke',
              description='Gezuckert, dadurch etwas dichter und zäher als Wasser.'),
+    # ------------------------------------------------------------- Zutaten
+    Material('Milch', '#f3f0e4', 1032, .0021, 0, 500, 3930, .050,
+             miscible=True, group='Zutaten',
+             description='Mischt sich als Emulsion ein und hellt alles auf, '
+                         'womit sie in Berührung kommt.'),
+    Material('Zucker', '#fffaf0', 1590, .0035, 0, 500, 1250, .045,
+             miscible=True, group='Zutaten',
+             description='Löst sich in der Flüssigkeit und hellt sie zusätzlich '
+                         'leicht auf.'),
     # --------------------------------------------------------------- Säuren
     # corrosion ist ein Spielparameter, keine kalibrierte Korrosionsrate. Die
     # Rangfolge folgt aber dem, was die Stoffe real mit Glas, Keramik und
@@ -92,11 +114,31 @@ PRESETS = [
              corrosion=.006, group='Säuren',
              description='Keine Säure, sondern Lauge — ätzt trotzdem, '
                          'besonders Aluminium und Glas.'),
+    # ----------------------------------------------------------------- Gas
+    Material('Dampf', '#dbe8ef', 420, .002, 0, 500, 2000, 0.,
+             gravity_scale=-.12, drag=3., miscible=True, group='Gas',
+             render='vapour', selectable=False),
 ]
 
 INDEX = {m.name: i for i, m in enumerate(PRESETS)}
 CLUMP, VOMIT, SOUP = INDEX['Kot-Klumpen'], INDEX['Erbrochenes'], INDEX['Buchstabensuppe']
 CHUNK, NOODLE = INDEX['Speisestückchen'], INDEX['Buchstabennudeln']
+MILK, SUGAR, STEAM = INDEX['Milch'], INDEX['Zucker'], INDEX['Dampf']
+
+# Emulsion und Zucker wandern wie Wärme zwischen Nachbarn: erhaltend, damit
+# ein Schuss Milch eine ganze Tasse aufhellt statt beliebig viel Weiss zu
+# erzeugen. Der Renderer macht daraus die hellere Textur.
+MIX_RATE = 3.4
+
+# Dampf: Lebensdauer in Sekunden, gedeckelte Zahl, Quellen siehe _fume().
+STEAM_LIFE = (1.4, 3.0)
+STEAM_LIMIT = 650
+STEAM_PER_STEP = 14
+BOIL_START = 62.           # ab hier dampft eine freie Oberfläche sichtbar
+# Zustandsfelder je Partikel. life zählt für Dampf Sekunden, für lösliche
+# Stoffe den verbliebenen Anteil; alles andere bekommt FOREVER.
+FOREVER = 1e9
+FIELDS = ('pos', 'vel', 'kind', 'temp', 'fuel', 'burning', 'milk', 'sugar', 'life')
 
 # Ätzlöcher: Kreise, in denen die Gefässwand weg ist. Sie halten die Kollision
 # und die Darstellung auf demselben Stand, ohne die Polygone neu zu vernetzen.
@@ -152,6 +194,9 @@ class Simulation:
         self.temp = np.empty(0)
         self.fuel = np.empty(0)
         self.burning = np.empty(0, dtype=bool)
+        self.milk = np.empty(0)
+        self.sugar = np.empty(0)
+        self.life = np.empty(0)
         self.time = 0.
         self.groups = []
         self.letter_index = 0
@@ -208,11 +253,12 @@ class Simulation:
         Warme Säure ätzt schneller, gedeckelt bei dreifachem Tempo.
         """
         if not len(self.pos) or not (self.container_polygons or self.obstacles):
-            return
+            return []
         rate = np.array([m.corrosion for m in self.materials])[self.kind]
         active = rate > 0
         if not active.any():
-            return
+            return []
+        before = {(round(h[0], 5), round(h[1], 5)) for h in self.holes}
         pts = self.pos[active]
         strength = rate[active]*(1.+np.clip(self.temp[active]-20., 0, 300)/150.)
         contact = self.spacing*1.4
@@ -239,6 +285,9 @@ class Simulation:
                 self.obstacles.pop(k)
             else:
                 self.obstacles[k][2] = cr
+        # Frisch geöffnete Stellen zischen: sie melden sich als Dampfquelle.
+        return [h[:2] for h in self.holes
+                if (round(h[0], 5), round(h[1], 5)) not in before or h[2] > HOLE_OPEN]
 
     def _etch(self, points, amount, contact, cap):
         """Vorhandene Löcher vergrössern, sonst einen neuen Ätzpunkt setzen."""
@@ -268,6 +317,93 @@ class Simulation:
             self.holes.append([float(point[0]), float(point[1]), HOLE_START])
             return
 
+    def _contact(self):
+        """Säureanteil in der Nachbarschaft, auf Oberflächenkontakt hochgezogen.
+
+        Ein Klumpen schwimmt meist auf der Säure; angegriffen wird nur die
+        benetzte Aussenseite. Die rohe Nachbarschaftssumme ist dort klein, also
+        wird sie skaliert, damit auch reiner Grenzflächenkontakt zählt.
+        """
+        return np.clip(self._acid_field*6., 0, 1.5)
+
+    def _react(self, duration):
+        """Säure zersetzt lösliche Stoffe und erwärmt die Reaktionszone."""
+        if not self._acidic:
+            return
+        contact = self._contact()
+        attacked = (self.decay > 0) & (contact > .04)
+        if attacked.any():
+            self.life[attacked] -= duration*self.decay[attacked]*contact[attacked]
+        # Schwach exotherm: die Reaktionszone wird wärmer und dampft dadurch mehr.
+        warming = contact*self.gas
+        if warming.any():
+            self.temp += np.minimum(warming, 1.5)*duration*38.
+
+    def _fume(self, duration, breaches=()):
+        """Dampfquellen: heisse freie Oberflächen, Säurereaktionen, Löcher."""
+        room = min(STEAM_PER_STEP, STEAM_LIMIT-int(np.count_nonzero(self.kind == STEAM)),
+                   self.limit-len(self.pos))
+        if room <= 0:
+            return
+        sources, temps = [], []
+        if len(self.pos):
+            liquid = self.kind != STEAM
+            # Je heisser, desto mehr: ab 62 °C, voll ausgereizt beim Sieden.
+            heat = np.clip((self.temp-BOIL_START)/38., 0, 1.6)*self._open_top*liquid
+            # Säure auf löslichem Material perlt sichtbar ab.
+            bubble = self._contact()*self.gas
+            chance = np.clip((heat*.5+bubble*.55)*duration*2.2, 0, .9)
+            picked = np.flatnonzero(self.rng.random(len(chance)) < chance)
+            if len(picked) > room:
+                picked = self.rng.choice(picked, room, replace=False)
+            if len(picked):
+                sources.append(self.pos[picked]+[0, self.spacing*1.8])
+                temps.append(np.maximum(self.temp[picked], 40.))
+        left = room-sum(len(p) for p in sources)
+        if breaches and left > 0:
+            spots = np.asarray(breaches, dtype=float)
+            take = self.rng.random(len(spots)) < duration*1.2
+            spots = spots[take][:left]
+            if len(spots):
+                sources.append(spots+[0, self.spacing])
+                temps.append(np.full(len(spots), 70.))
+        if not sources:
+            return
+        points = np.vstack(sources)
+        self._spawn_steam(points, np.concatenate(temps))
+
+    def _spawn_steam(self, points, temperature):
+        """Dampf entsteht ohne Abstandsprüfung: er darf sich überlagern."""
+        d = self.spacing
+        inside = ((points >= d/2) & (points <= [self.width-d/2, self.height-d/2])).all(axis=1)
+        points, temperature = points[inside], np.asarray(temperature)[inside]
+        n = len(points)
+        if not n:
+            return
+        drift = self.rng.normal(0, .12, (n, 2))
+        drift[:, 1] = abs(drift[:, 1])+.25
+        self.pos = np.vstack((self.pos, points))
+        self.vel = np.vstack((self.vel, drift))
+        self.kind = np.r_[self.kind, np.full(n, STEAM, dtype=int)]
+        self.temp = np.r_[self.temp, temperature]
+        self.fuel = np.r_[self.fuel, np.ones(n)]
+        self.burning = np.r_[self.burning, np.zeros(n, dtype=bool)]
+        self.milk = np.r_[self.milk, np.zeros(n)]
+        self.sugar = np.r_[self.sugar, np.zeros(n)]
+        self.life = np.r_[self.life, self.rng.uniform(*STEAM_LIFE, n)]
+        self.topology += 1
+
+    def _reap(self, duration):
+        """Dampf verweht, aufgelöste Stoffe verschwinden."""
+        if not len(self.pos):
+            return
+        steam = self.kind == STEAM
+        if steam.any():
+            self.life[steam] -= duration
+        finite = self.life < FOREVER
+        if finite.any():
+            self._drop(self.life > 0)
+
     def _properties(self):
         self.rho0 = np.array([m.density for m in self.materials])[self.kind]
         self.mu = np.array([m.viscosity for m in self.materials])[self.kind]
@@ -275,6 +411,11 @@ class Simulation:
         self.flash = np.array([m.ignition for m in self.materials])[self.kind]
         self.flame = np.array([m.flammability for m in self.materials])[self.kind]
         self.sigma = np.array([m.cohesion for m in self.materials])[self.kind]
+        self.g_scale = np.array([m.gravity_scale for m in self.materials])[self.kind]
+        self.friction = np.array([m.drag for m in self.materials])[self.kind]
+        self.decay = np.array([m.dissolves for m in self.materials])[self.kind]
+        self.gas = np.array([m.fizz for m in self.materials])[self.kind]
+        self.acidity = np.array([m.corrosion for m in self.materials])[self.kind]
         self.mass = self.rho0 * self.spacing**2
         self.inv_mass = 1./self.mass
         self.capacity = self.mass*self.cp
@@ -290,7 +431,9 @@ class Simulation:
         mass = rho*self.spacing**2
         cap = mass*cp
         a, b = np.meshgrid(np.arange(k), np.arange(k), indexing='ij')
-        same = np.where(a == b, 1., .2)
+        mixes = np.array([m.miscible for m in self.materials])
+        # Mischbare Stoffe (Milch, Zucker) entmischen sich nicht künstlich.
+        same = np.where((a == b) | mixes[a] | mixes[b], 1., .2)
         self._t_art = (2*mass[a]*mass[b]/(rho[a]+rho[b])).ravel()
         self._t_mu = (2*mu[a]*mu[b]/np.maximum(mu[a]+mu[b], 1e-12)).ravel()
         self._t_coh = (np.sqrt(sig[a]*sig[b])*same).ravel()
@@ -376,8 +519,33 @@ class Simulation:
             self.temp = np.r_[self.temp, np.full(n, float(temperature))]
             self.fuel = np.r_[self.fuel, np.ones(n)]
             self.burning = np.r_[self.burning, np.zeros(n, dtype=bool)]
+            self.milk = np.r_[self.milk, np.full(n, 1. if kind == MILK else 0.)]
+            self.sugar = np.r_[self.sugar, np.full(n, 1. if kind == SUGAR else 0.)]
+            self.life = np.r_[self.life, np.full(n, self._start_life(kind))]
             self.topology += 1
         return n
+
+    def _start_life(self, kind):
+        """Dampf zählt Sekunden, lösliche Stoffe ihren Restanteil."""
+        if kind == STEAM:
+            return float(self.rng.uniform(*STEAM_LIFE))
+        return 1. if self.materials[kind].dissolves > 0 else FOREVER
+
+    def _drop(self, keep):
+        """Partikel entfernen und die Formgruppen auf die neue Nummerierung ziehen."""
+        if keep.all():
+            return
+        remap = np.cumsum(keep)-1
+        groups = []
+        for ids, rest in self.groups:
+            survive = keep[ids]
+            if survive.sum() > 1:
+                shape = rest[survive]
+                groups.append((remap[ids[survive]], shape-shape.mean(axis=0)))
+        self.groups = groups
+        for attr in FIELDS:
+            setattr(self, attr, getattr(self, attr)[keep])
+        self.topology += 1
 
     def scene(self, name):
         if name not in SCENES:
@@ -404,6 +572,9 @@ class Simulation:
         self.temp = np.full(len(pts), 20.)
         self.fuel = np.ones(len(pts))
         self.burning = np.zeros(len(pts), dtype=bool)
+        self.milk = np.zeros(len(pts))
+        self.sugar = np.zeros(len(pts))
+        self.life = np.full(len(pts), FOREVER)
         self.topology += 1
 
     # ----------------------------------------------------- neighbour search
@@ -469,19 +640,7 @@ class Simulation:
         elif tool == 'stir':
             self.vel += w[:, None]*np.clip([dx, dy], -2, 2)*3
         elif tool == 'erase':
-            keep = distance > radius
-            if not keep.all():
-                remap = np.cumsum(keep)-1
-                groups = []
-                for ids, rest in self.groups:
-                    survive = keep[ids]
-                    if survive.sum() > 1:
-                        shape = rest[survive]
-                        groups.append((remap[ids[survive]], shape-shape.mean(axis=0)))
-                self.groups = groups
-                for attr in ('pos', 'vel', 'kind', 'temp', 'fuel', 'burning'):
-                    setattr(self, attr, getattr(self, attr)[keep])
-                self.topology += 1
+            self._drop(distance > radius)
 
     # ------------------------------------------------------------- solver
 
@@ -491,6 +650,13 @@ class Simulation:
             return
         self._properties()
         self._pair_tables()
+        self._acidic = bool((self.acidity > 0).any())
+        self._mixing = bool((self.milk > 0).any() or (self.sugar > 0).any())
+        self._gassy = bool((self.friction > 0).any())
+        self._steaming = self._acidic or bool((self.temp > BOIL_START).any())
+        self._acid_field = np.zeros(len(self.pos))
+        self._exposed = np.zeros(len(self.pos), dtype=bool)
+        self._open_top = np.zeros(len(self.pos), dtype=bool)
         # Contiguous structure-of-arrays view for the whole advance.
         x = np.ascontiguousarray(self.pos[:, 0])
         y = np.ascontiguousarray(self.pos[:, 1])
@@ -508,7 +674,10 @@ class Simulation:
         self.substeps = taken
         self.pos = np.column_stack((x, y))
         self.vel = np.column_stack((vx, vy))
-        self._corrode(duration)
+        breaches = self._corrode(duration)
+        self._react(duration)
+        self._fume(duration, breaches)
+        self._reap(duration)
 
     def _step(self, dt, x, y, vx, vy):
         n = x.size
@@ -571,7 +740,11 @@ class Simulation:
         ax = (np.bincount(i, fx, minlength=n)-np.bincount(j, fx, minlength=n))*self.inv_mass
         ay = (np.bincount(i, fy, minlength=n)-np.bincount(j, fy, minlength=n))*self.inv_mass
         vx += dt*ax
-        vy += dt*(ay-self.gravity)
+        vy += dt*(ay-self.gravity*self.g_scale)
+        if self._gassy:
+            slow = 1./(1.+self.friction*dt)
+            vx *= slow
+            vy *= slow
         x += dt*vx
         y += dt*vy
         # Reduced rigid inclusions: project each particle group onto its closest
@@ -618,12 +791,29 @@ class Simulation:
             vx[hit] -= 1.08*speed[hit]*nxs[hit]
             vy[hit] -= 1.08*speed[hit]*nys[hit]
         collide(x, y, vx, vy, self.container_polygons, margin, self.open_holes())
+        # Emulsion: Milch und gelöster Zucker wandern erhaltend zu den Nachbarn.
+        if self._mixing:
+            share = np.minimum(MIX_RATE*q2*dt, .5)
+            for field in (self.milk, self.sugar):
+                flow = share*(field[j]-field[i])
+                field += np.bincount(i, flow, minlength=n)-np.bincount(j, flow, minlength=n)
+        # Säurekontakt je Partikel: gewichtete Nachbarschaft ätzender Stoffe.
+        if self._acidic:
+            acid = self.acidity > 0
+            self._acid_field = (np.bincount(i, w*acid[j], minlength=n) +
+                                np.bincount(j, w*acid[i], minlength=n))/(volume*norm)
         # Accelerated effective heat diffusion, equal and opposite energy exchange.
         heat = (c_heat*q2)*(self.temp[j]-self.temp[i])*dt
         energy = np.bincount(i, heat, minlength=n)-np.bincount(j, heat, minlength=n)
         self.temp += energy/self.capacity
         # Burning is restricted to approximately exposed particles (oxygen proxy).
         exposed = theta < .91
+        self._exposed = exposed
+        if self._steaming:
+            # Dampf entsteht nur oben: Nachbarn oberhalb wiegen die Stelle zu.
+            roof = (np.bincount(i, w*(dy < 0), minlength=n) +
+                    np.bincount(j, w*(dy > 0), minlength=n))/(volume*norm)
+            self._open_top = roof < .22
         self.burning = (self.flame > 0) & (self.temp >= self.flash) & (self.fuel > 0) & exposed
         consumed = np.minimum(self.fuel, self.burning*self.flame*dt*.22)
         self.fuel -= consumed
@@ -636,14 +826,16 @@ class Simulation:
     def count(self):
         return len(self.pos)
 
-    # Wire format: 8 bytes per particle instead of 20 floats-as-float32.
+    # Wire format: 10 bytes per particle instead of 20 floats-as-float32.
     # x, y and temperature are quantised to uint16, which is far finer than the
     # particle spacing (27 µm over 1.8 m) and invisible after interpolation.
-    STRIDE = 8
+    # Die letzten zwei Bytes tragen Emulsion und gelösten Zucker; daraus macht
+    # der Shader die hellere Textur.
+    STRIDE = 10
     TEMP_SCALE = 40.            # 0 … 1638 °C in 0.025 °C steps
 
     def packed(self):
-        """Particle payload: uint16 x, uint16 y, uint16 temp, uint8 kind, uint8 burning."""
+        """uint16 x, y, temp; uint8 kind, burning, milk, sugar."""
         n = len(self.pos)
         out = np.zeros((n, self.STRIDE), dtype=np.uint8)
         if n:
@@ -653,6 +845,8 @@ class Simulation:
             shorts[:, 2] = np.clip(self.temp*self.TEMP_SCALE, 0, 65535)
             out[:, 6] = np.minimum(self.kind, 255)
             out[:, 7] = self.burning*255
+            out[:, 8] = np.clip(self.milk, 0, 1)*255
+            out[:, 9] = np.clip(self.sugar, 0, 1)*255
         return out.tobytes()
 
     def meta(self):
@@ -664,6 +858,7 @@ class Simulation:
                 'topology': self.topology, 'substeps': self.substeps, 'stride': self.STRIDE,
                 'materials': [asdict(m) for m in self.materials],
                 'hot': int(np.sum(self.burning)),
+                'steam': int(np.count_nonzero(self.kind == STEAM)) if len(self.kind) else 0,
                 'temperature': round(float(np.mean(self.temp)), 1) if len(self.temp) else 20}
 
     def snapshot(self):

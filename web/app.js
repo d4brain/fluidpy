@@ -54,7 +54,7 @@ canvas.onpointerleave=()=>{if(!pointer)cursor=null;};
 document.addEventListener('visibilitychange',()=>{pointer=null;last=null;});
 new ResizeObserver(()=>{if(renderer)renderer.resize(+$('quality').value);}).observe(canvas);
 
-const STRIDE=8;
+const STRIDE=10;               // uint16 x,y,temp + uint8 kind,burning,milk,sugar
 function decode(buffer){
  const view=new DataView(buffer),length=view.getUint32(0,true);
  const meta=JSON.parse(new TextDecoder().decode(new Uint8Array(buffer,4,length)));
@@ -94,8 +94,8 @@ function geometry(){
  // Material and burning flag come from the newer frame; position and
  // temperature are the interpolated uint16 triples.
  blend.bytes.set(b.bytes);
- const n=b.meta.count*4,src=a.shorts,dst=b.shorts,out=blend.shorts;
- for(let k=0;k<n;k+=4)for(let c=0;c<3;c++)out[k+c]=src[k+c]+(dst[k+c]-src[k+c])*alpha;
+ const words=STRIDE/2,n=b.meta.count*words,src=a.shorts,dst=b.shorts,out=blend.shorts;
+ for(let k=0;k<n;k+=words)for(let c=0;c<3;c++)out[k+c]=src[k+c]+(dst[k+c]-src[k+c])*alpha;
  return{data:blend.bytes,count:b.meta.count,key:b.meta.frame*2+1,alpha};
 }
 function draw(){
@@ -123,7 +123,8 @@ function readout(force){
  $('status').textContent=state.count>=state.limit?'PARTIKELLIMIT ERREICHT':state.paused?'PAUSIERT · WERKZEUGE AKTIV':
   open?open+(open===1?' LOCH':' LÖCHER')+' DURCHGEFRESSEN':
   pits?'GEFÄSS WIRD ANGEÄTZT · '+pits+' STELLEN':
-  state.hot?state.hot+' BRENNENDE PARTIKEL':'SPH AKTIV · '+state.compute_ms+' ms / SCHRITT · '+Math.round(1000/Math.max(state.interval_ms,.1))+' SCHRITTE/S';
+  state.hot?state.hot+' BRENNENDE PARTIKEL':
+  (state.steam?state.steam+' DAMPF · ':'')+'SPH AKTIV · '+state.compute_ms+' ms / SCHRITT · '+Math.round(1000/Math.max(state.interval_ms,.1))+' SCHRITTE/S';
 }
 function nextBody(){
  if(saving||sharedId||!state)return null;

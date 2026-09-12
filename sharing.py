@@ -14,7 +14,7 @@ import threading
 import time
 import numpy as np
 from PIL import Image
-from physics import Material, RESOLUTIONS
+from physics import Material, RESOLUTIONS, FIELDS, FOREVER
 from containers import outlines
 
 ID = re.compile(r'^[A-Za-z0-9_-]{22}$')
@@ -26,7 +26,7 @@ def dump_sim(sim):
                 letter_index=sim.letter_index, rng=sim.rng.bit_generator.state,
                 holes=[list(map(float,h)) for h in sim.holes],
                 groups=[[ids.tolist(),rest.tolist()] for ids,rest in sim.groups],
-                **{k:getattr(sim,k).tolist() for k in ('pos','vel','kind','temp','fuel','burning')})
+                **{k:getattr(sim,k).tolist() for k in FIELDS})
 
 def restore_sim(sim, data):
     # Only stored, server-generated snapshots reach this function.
@@ -35,9 +35,13 @@ def restore_sim(sim, data):
     for k in ('gravity','time','last_scene','obstacles','letter_index'):setattr(sim,k,data[k])
     sim.holes=[list(map(float,h)) for h in data.get('holes',())]
     sim.materials=[Material(**m) for m in data['materials']]
-    for k in ('pos','vel','kind','temp','fuel','burning'):
+    for k in FIELDS:
+        if k not in data:
+            continue                      # ältere Aufnahmen kennen milk/sugar/life nicht
         v=np.asarray(data[k],dtype=int if k=='kind' else bool if k=='burning' else float)
         setattr(sim,k,v.reshape(-1,2) if k in ('pos','vel') else v)
+    for k,fill in (('milk',0.),('sugar',0.),('life',FOREVER)):
+        if len(getattr(sim,k))!=len(sim.pos):setattr(sim,k,np.full(len(sim.pos),fill))
     sim.groups=[(np.asarray(ids,dtype=int),np.asarray(rest,dtype=float)) for ids,rest in data['groups']]
     sim.rng.bit_generator.state=data['rng'];sim.paused=True
 

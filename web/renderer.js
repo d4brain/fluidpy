@@ -1,4 +1,5 @@
 'use strict';
+const VERTEX_STRIDE=10;        // Bytes je Partikel, siehe physics.Simulation.STRIDE
 // WebGL 2: additive particle density followed by a shaded surface pass.
 // No Canvas2D drawing and no external rendering framework.
 // The vertex buffer is uploaded straight from the server's float32 payload;
@@ -32,21 +33,34 @@ class FluidRenderer {
    layout(location=1) in float material;
    layout(location=2) in float temperature;
    layout(location=3) in float burning;
-   uniform float pixelsPerMeter; uniform float radius; uniform vec3 palette[32]; uniform float tempScale; uniform float solids[32];
-   out vec3 tint; out float heat; out float fire; out float solid;
-   void main(){gl_Position=vec4(position*2.0-1.0,0,1);gl_PointSize=2.0*radius*pixelsPerMeter;
-    int k=int(clamp(material,0.0,31.0));solid=solids[k];tint=palette[k];heat=temperature*tempScale;fire=burning;}
+   layout(location=4) in float milk;
+   layout(location=5) in float sugar;
+   uniform float pixelsPerMeter; uniform float radius; uniform vec3 palette[32]; uniform float tempScale; uniform float kinds[32];
+   out vec3 tint; out float heat; out float fire; out float form;
+   void main(){
+    int k=int(clamp(material,0.0,31.0));form=kinds[k];
+    gl_Position=vec4(position*2.0-1.0,0,1);
+    // Dampf bekommt breitere Punkte als Flüssigkeit und Feststoff.
+    gl_PointSize=2.0*radius*pixelsPerMeter*(form>1.5?2.3:1.0);
+    // Emulsion: Milch hellt auf und entsättigt, gelöster Zucker legt etwas nach.
+    vec3 c=palette[k];
+    c=mix(c,vec3(.97,.95,.90),clamp(milk,0.0,1.0)*.80);
+    c=mix(c,vec3(1.0,.99,.96),clamp(sugar,0.0,1.0)*.20);
+    tint=c;heat=temperature*tempScale;fire=burning;}
   `,`#version 300 es
    precision highp float; precision highp int;
-   in vec3 tint; in float heat; in float fire; in float solid;
+   in vec3 tint; in float heat; in float fire; in float form;
    uniform int mode; uniform int thermalView;out vec4 fragColor;
    vec3 thermal(float t){float h=clamp(0.64-t/1550.0,0.0,0.64);return clamp(abs(fract(vec3(h)+vec3(0,0.6667,0.3333))*6.0-3.0)-1.0,0.0,1.0)*0.8+0.16;}
    void main(){
-    if(mode==3 && solid<0.5)discard;
-    if(mode!=1 && mode!=3 && solid>0.5)discard;
+    // form: 0 Flüssigkeit, 1 Feststoff, 2 Dampf. Der Dichtepass zeichnet nur
+    // Flüssigkeit, die Überlagerung nur Feststoff und Dampf.
+    if(mode==3 && form<0.5)discard;
+    if(mode!=1 && mode!=3 && form>0.5)discard;
     vec2 p=gl_PointCoord*2.0-1.0;float r2=dot(p,p);if(r2>1.0)discard;
     vec3 c=(mode==2 || thermalView==1)?thermal(heat):tint;c=mix(c,vec3(1.0,0.44,0.06),fire*0.88);
-    if(mode==1 || mode==3){float edge=1.0-smoothstep(0.78,1.0,r2);float light=0.8+0.2*sqrt(1.0-r2);fragColor=vec4(c*light,edge);}
+    if(form>1.5){float a=(1.0-smoothstep(0.0,1.0,r2))*(mode==1?0.40:0.24);fragColor=vec4(mix(c,vec3(.92,.96,1.0),.45),a);}
+    else if(mode==1 || mode==3){float edge=1.0-smoothstep(0.78,1.0,r2);float light=0.8+0.2*sqrt(1.0-r2);fragColor=vec4(c*light,edge);}
     else{float density=0.30*exp(-3.0*r2)*(1.0-smoothstep(0.85,1.0,r2));fragColor=vec4(c*density,density);}
    }
   `);
@@ -101,15 +115,16 @@ class FluidRenderer {
   g.enableVertexAttribArray(1);g.vertexAttribPointer(1,3,g.FLOAT,false,20,8);
   this.vesselKey=null;
   this.uniforms=new Map();
-  this.palette=new Float32Array(96);this.solids=new Float32Array(32);
+  this.palette=new Float32Array(96);this.kinds=new Float32Array(32);
   this.vao=g.createVertexArray();g.bindVertexArray(this.vao);
   this.buffer=g.createBuffer();g.bindBuffer(g.ARRAY_BUFFER,this.buffer);
-  // Server layout, 8 bytes: uint16 x, uint16 y, uint16 temp, uint8 kind, uint8 burning.
+  // Server layout, 10 bytes: uint16 x, y, temp; uint8 kind, burning, milk, sugar.
   // Positions and temperature arrive normalised; the shader scales them back.
   for(const [loc,size,type,normalized,offset] of [
    [0,2,g.UNSIGNED_SHORT,true,0],[2,1,g.UNSIGNED_SHORT,true,4],
-   [1,1,g.UNSIGNED_BYTE,false,6],[3,1,g.UNSIGNED_BYTE,true,7]]){
-   g.enableVertexAttribArray(loc);g.vertexAttribPointer(loc,size,type,normalized,8,offset);}
+   [1,1,g.UNSIGNED_BYTE,false,6],[3,1,g.UNSIGNED_BYTE,true,7],
+   [4,1,g.UNSIGNED_BYTE,true,8],[5,1,g.UNSIGNED_BYTE,true,9]]){
+   g.enableVertexAttribArray(loc);g.vertexAttribPointer(loc,size,type,normalized,VERTEX_STRIDE,offset);}
   this.emptyVao=g.createVertexArray();g.bindVertexArray(this.emptyVao);
   this.corners=g.createBuffer();g.bindBuffer(g.ARRAY_BUFFER,this.corners);
   g.bufferData(g.ARRAY_BUFFER,new Float32Array([0,0,2,0,0,2]),g.STATIC_DRAW);
@@ -138,13 +153,13 @@ class FluidRenderer {
  }
  setPalette(materials){
   const key=materials.map(m=>m.color+m.render).join('');if(key===this.paletteKey)return;this.paletteKey=key;
-  materials.slice(0,32).forEach((m,i)=>{this.solids[i]=m.render==='solid'?1:0;for(let k=0;k<3;k++)this.palette[i*3+k]=parseInt(m.color.slice(1+k*2,3+k*2),16)/255;});
-  const g=this.gl;g.useProgram(this.splat);g.uniform3fv(this.u(this.splat,'palette[0]'),this.palette);g.uniform1fv(this.u(this.splat,'solids[0]'),this.solids);
+  materials.slice(0,32).forEach((m,i)=>{this.kinds[i]=m.render==='vapour'?2:m.render==='solid'?1:0;for(let k=0;k<3;k++)this.palette[i*3+k]=parseInt(m.color.slice(1+k*2,3+k*2),16)/255;});
+  const g=this.gl;g.useProgram(this.splat);g.uniform3fv(this.u(this.splat,'palette[0]'),this.palette);g.uniform1fv(this.u(this.splat,'kinds[0]'),this.kinds);
  }
- // buffer: Uint8Array in the server's 8-byte layout, already interpolated.
+ // buffer: Uint8Array in the server's 10-byte layout, already interpolated.
  upload(buffer,count,stamp){
   if(stamp===this.stamp)return;this.stamp=stamp;this.count=count;
-  const bytes=count*8,g=this.gl;g.bindBuffer(g.ARRAY_BUFFER,this.buffer);
+  const bytes=count*VERTEX_STRIDE,g=this.gl;g.bindBuffer(g.ARRAY_BUFFER,this.buffer);
   if(bytes>this.capacity){this.capacity=bytes+8192;g.bufferData(g.ARRAY_BUFFER,this.capacity,g.DYNAMIC_DRAW);}
   if(bytes)g.bufferSubData(g.ARRAY_BUFFER,0,buffer,0,bytes);
  }

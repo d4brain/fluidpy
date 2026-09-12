@@ -1,3 +1,11 @@
+# Neu: Milch, Zucker und Dampf
+
+Milch mischt sich als Emulsion ein und hellt auf, womit sie in Berührung kommt;
+Zucker hellt zusätzlich leicht nach. Kot löst sich in Säure langsam auf,
+Erbrochenes schäumt darin statt sich aufzulösen. Heisse Oberflächen, Säure
+an der Gefässwand und diese Reaktionen erzeugen aufsteigenden Dampf. Details
+unten unter „Erweiterung: Emulsion, Reaktionen und Dampf“.
+
 # Neu: Getränke und Säuren, die Gefässe durchfressen
 
 Kaffee und Cola als weitere Flüssigkeiten. Dazu sieben ätzende Stoffe —
@@ -287,6 +295,7 @@ Konvergenzstudie oder experimentelle Validierung.
 - `web/`: HTML5-Oberfläche, CSS und Canvas-Zeichnung.
 - `test_physics.py`: numerische Regressionstests.
 - `test_acids.py`: Ätzlöcher, Durchlass, Hindernisauflösung, Persistenz.
+- `test_mixing.py`: Emulsion, Zucker, Auflösung in Säure, Dampf.
 - `start.bat`: Windows-Start mit isolierter Python-Umgebung.
 - `Dockerfile`, `docker-compose.yml`: Containerbetrieb hinter einem Reverse Proxy.
 - `docker-compose.traefik.yml`: Veröffentlichung von fluid.occdn.com über Traefik.
@@ -319,6 +328,65 @@ Wiederherstellung des WebGL-Kontexts werden behandelt.
 
 API-Hintergrund: https://developer.mozilla.org/en-US/docs/Web/API/WebGL2RenderingContext
 
+
+## Erweiterung: Emulsion, Reaktionen und Dampf
+
+### Milch und Zucker
+
+Zwei Zutaten in der eigenen Gruppe **Zutaten**:
+
+- **Milch** (1032 kg/m³, 0,0021 Pa·s) startet mit voller Emulsionsladung.
+- **Zucker** (1590 kg/m³) ist deutlich dichter, sinkt daher ab und rührt beim
+  Absinken mit.
+
+Jedes Partikel trägt zwei zusätzliche Werte, `milk` und `sugar`. Beide wandern
+wie die Wärme entlang der Nachbarpaare und werden dabei **erhalten**: ein Schuss
+Milch verteilt sich über die ganze Tasse, erzeugt aber nie mehr Weiss, als
+eingegossen wurde. Viel Milch in wenig Kaffee wird fast weiss, ein Tropfen in
+einer vollen Tasse nur eine Spur. Rühren beschleunigt das Vermischen.
+
+Der Shader macht daraus die Farbe: `milk` mischt bis zu 80 % Richtung Weiss,
+`sugar` weitere 20 %. Dadurch wird zuerst der Kaffee heller, und der Zucker
+hellt danach noch einmal etwas nach. Milch und Zucker sind als *mischbar*
+markiert und bekommen deshalb keine abgesenkte Kohäsion gegenüber fremden
+Stoffen — sie entmischen sich nicht künstlich.
+
+Das Übertragungsformat wächst dafür von 8 auf 10 Byte je Partikel:
+`uint16 x, y, temp` plus `uint8 kind, burning, milk, sugar`.
+
+### Kot und Erbrochenes in Säure
+
+Materialien haben zwei neue Kennwerte: `dissolves` (Zerfall pro Sekunde bei
+vollem Säurekontakt) und `fizz` (Gasentwicklung). Der Säureanteil in der
+Nachbarschaft wird pro Partikel aus denselben Paaren berechnet, die der Solver
+ohnehin bildet, und auf Oberflächenkontakt hochgezogen: ein Klumpen schwimmt
+meist auf der Säure, angegriffen wird nur die benetzte Aussenseite.
+
+- **Kot-Klumpen** lösen sich von aussen nach innen auf; ein Klumpen ist nach
+  rund zehn Sekunden verschwunden und gast dabei sichtbar.
+- **Speisestückchen** und **Buchstabennudeln** lösen sich langsamer.
+- **Erbrochenes** löst sich nicht auf, schäumt dafür kräftig — das ist der
+  sichtbare Unterschied zum Kot.
+
+Die Reaktion ist schwach exotherm: die Zone wird wärmer, was wiederum mehr
+Dampf erzeugt. In Wasser passiert nichts davon.
+
+### Dampf
+
+Dampf ist ein eigenes Material mit negativer Schwerkraft (`gravity_scale`) und
+Luftwiderstand (`drag`), der die Steiggeschwindigkeit auf etwa 0,4 m/s
+begrenzt. Er ist nicht wählbar, sondern entsteht von selbst:
+
+1. an freien Oberflächen ab etwa 62 °C, umso stärker je heisser,
+2. wo Säure ein Loch durch die Gefässwand frisst,
+3. wo Säure auf Kot, Speisereste oder Erbrochenes trifft.
+
+Damit Dampf nur oben entsteht und nicht mitten in der Flüssigkeit, zählt der
+Solver für jedes Partikel die Nachbarn oberhalb; gedampft wird nur, wo darüber
+nichts mehr liegt. Jedes Dampfpartikel lebt 1,4 bis 3 Sekunden und verschwindet
+dann. Die Zahl ist auf 650 gedeckelt, damit das Partikelbudget nicht aufgeht.
+Der Renderer zeichnet Dampf als weiche, halbdurchsichtige Punkte über der
+Flüssigkeit — nicht als Teil der Flüssigkeitsoberfläche.
 
 ## Erweiterung: Säuren und Korrosion
 
