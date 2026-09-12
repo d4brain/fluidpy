@@ -277,6 +277,15 @@ Konvergenzstudie oder experimentelle Validierung.
 ## WebGL-Darstellung
 
 Ein WebGL-2-fähiger Browser ist erforderlich. Keine Canvas2D-Ersatzdarstellung.
+
+Getestet mit Chrome/Chromium und Firefox. Die Shader sind bewusst strikt nach
+GLSL ES 3.00 geschrieben: `int`-Präzision wird in jedem Shader explizit gesetzt
+(im Vertex-Shader ist der Default `highp`, im Fragment-Shader `mediump`; ein in
+beiden deklariertes Uniform muss in Typ *und* Präzision übereinstimmen, sonst
+scheitert das Linken). Das Vollbild-Dreieck der Oberflächenstufe nutzt ein
+echtes Vertex-Attribut statt `gl_VertexID`, weil einzelne Treiber ohne
+gebundenen Puffer nichts zeichnen. Scheitert der Renderer trotzdem, steht die
+konkrete WebGL-Meldung in der Statuszeile unter dem Becken.
 Der Renderer sammelt gewichtete Partikelfarben und Dichte in einer GPU-Textur.
 Ein zweiter Shader erzeugt daraus eine zusammenhängende Oberfläche mit weicher
 Kontur und Beleuchtung. Die Temperaturansicht nutzt denselben Oberflächenpass.
@@ -292,3 +301,32 @@ Bei Partikelzu- oder -abgang wird nicht interpoliert. Verlust und
 Wiederherstellung des WebGL-Kontexts werden behandelt.
 
 API-Hintergrund: https://developer.mozilla.org/en-US/docs/Web/API/WebGL2RenderingContext
+
+
+## Erweiterung: Klumpen, Stückchen und Buchstabensuppe
+
+Vier zusätzliche Materialien und Startszenen sind direkt auswählbar:
+
+- **Durchfall:** dünnflüssige braune Mischung (0,035 Pa·s).
+- **Kot-Klumpen:** kompakte braune Körper mit angenäherter Formerhaltung.
+- **Erbrochenes:** gelbgrüne Flüssigkeit (0,18 Pa·s) mit orangefarbenen Speisestückchen.
+- **Buchstabensuppe:** rote Brühe mit hellen Nudelbuchstaben A, E, F, H, L, O, P, U.
+
+Eingießen erzeugt pro freiem Pinselabdruck einen Klumpen bzw. eine Einlage mit
+umgebender Flüssigkeit. Die Buchstaben wechseln der Reihe nach. Am Rand, in
+Hindernissen oder bei Platzmangel werden unvollständige Einlagen ausgelassen.
+Rühren, Schwerkraft, Temperatur, Entfernen und Auflösungswechsel funktionieren
+auch mit den neuen Materialien. Stückchen und Nudeln sind interne Materialien;
+eigene Mischungen bleiben über das vorhandene Formular möglich.
+
+Einlagen bestehen aus SPH-Partikeln, deren Anordnung pro Zeitschritt auf eine
+rotierte Ausgangsform projiziert wird. Dadurch reagieren sie auf Flüssigkeitskräfte
+und behalten ihre Form weitgehend bei. Kollisionen können sie kurzfristig verformen.
+Es handelt sich um ein illustratives Modell, nicht um kalibrierte Rheologie oder
+einen exakten Starrkörpersolver. WebGL zeichnet Einlagen getrennt über der Flüssigkeit,
+damit Stücke und Nudelkonturen erkennbar bleiben; thermische Farben und der
+Partikelmodus bleiben verfügbar. Das Binärformat bleibt bei 8 Byte pro Partikel.
+
+Start: `python fluid_server.py` oder unter Windows `start.bat`.
+`app.py` stellt den von vorhandenen Startskripten erwarteten Einstieg bereit.
+Tests: `python -m unittest -v test_physics test_inclusions test_http`.

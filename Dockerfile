@@ -13,7 +13,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt "scipy>=1.11"
 
-COPY physics.py app.py ./
+COPY physics.py app.py fluid_server.py ./
 COPY web ./web
 
 # Unprivilegiert; das Abbild wird zur Laufzeit schreibgeschützt eingebunden.

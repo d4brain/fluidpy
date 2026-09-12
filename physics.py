@@ -29,6 +29,9 @@ class Material:
     ignition: float
     heat_capacity: float
     cohesion: float
+    render: str = "fluid"
+    selectable: bool = True
+    description: str = ""
 
 
 PRESETS = [
@@ -36,7 +39,26 @@ PRESETS = [
     Material('Öl', '#ffbc48', 850, .08, .65, 300, 2000, .035),
     Material('Alkohol', '#c397ff', 789, .0012, 1, 365, 2440, .022),
     Material('Sirup', '#f07185', 1380, 3, 0, 500, 2500, .08),
+    Material('Durchfall', '#927132', 1030, .035, 0, 500, 3800, .025,
+             description='Dünnflüssig, braun und leicht zäh.'),
+    Material('Kot-Klumpen', '#65412b', 1080, 4, 0, 500, 2400, .12,
+             render='solid', description='Zusammenhängende Klumpen, die fallen und sich drehen.'),
+    Material('Erbrochenes', '#a6a044', 1020, .18, 0, 500, 3600, .045,
+             description='Zähe Flüssigkeit mit orangefarbenen Speisestückchen.'),
+    Material('Buchstabensuppe', '#ba5825', 1005, .008, 0, 500, 4000, .025,
+             description='Rote Brühe mit hellen Nudelbuchstaben A, E, F, H, L, O, P, U.'),
+    Material('Speisestückchen', '#e9ab66', 1060, 1.5, 0, 500, 2800, .10,
+             render='solid', selectable=False),
+    Material('Buchstabennudeln', '#ffe4a0', 1040, .8, 0, 500, 2800, .10,
+             render='solid', selectable=False),
 ]
+
+SCENES = ('empty', 'dam', 'layers', 'diarrhea', 'clumps', 'vomit', 'soup')
+# Particle silhouettes; connected strokes stay together through shape matching.
+LETTERS = ('010/101/111/101/101', '111/100/110/100/111',
+           '111/100/110/100/100', '101/101/111/101/101',
+           '100/100/100/100/111', '111/101/101/101/111',
+           '110/101/110/100/100', '101/101/101/101/111')
 
 # Resolution presets: particle spacing in metres, support radius factor 2.5.
 RESOLUTIONS = {'fein': .015, 'mittel': .020, 'grob': .026}
@@ -75,6 +97,8 @@ class Simulation:
         self.fuel = np.empty(0)
         self.burning = np.empty(0, dtype=bool)
         self.time = 0.
+        self.groups = []
+        self.letter_index = 0
         self.obstacles = []
         self.topology += 1
 
@@ -123,15 +147,46 @@ class Simulation:
         if not 0 <= kind < len(self.materials):
             raise ValueError('Unbekanntes Material')
         d = self.spacing
-        free = max(0, self.limit-len(self.pos))
-        if not free:
-            return 0
+        if kind == 5:
+            # One compact oval per brush application, independent of liquid grid.
+            r = min(radius, .06)
+            grid = np.arange(-r, r+d/2, d)
+            gx, gy = np.meshgrid(grid, grid)
+            mask = (gx/r)**2+(gy/(r*.75))**2 <= 1
+            return self._append(np.column_stack((gx[mask]+x, gy[mask]+y)),
+                                kind, temperature, solid=True)
+        added = 0
+        if kind in (6, 7):
+            if kind == 7:
+                glyph = LETTERS[self.letter_index % len(LETTERS)].split('/')
+                offsets = np.array([(col-1, 2-row) for row, line in enumerate(glyph)
+                                    for col, value in enumerate(line) if value == '1'])
+                ingredient = 9
+            else:
+                offsets = np.array([[-.5, -.5], [.5, -.5], [-.5, .5], [.5, .5]])
+                ingredient = 8
+            angle = self.rng.uniform(-.65, .65)
+            rotation = np.array([[np.cos(angle), -np.sin(angle)],
+                                 [np.sin(angle), np.cos(angle)]])
+            pts = offsets @ rotation.T*d + [x, y]
+            added = self._append(pts, ingredient, temperature, solid=True)
+            if added and kind == 7:
+                self.letter_index += 1
+            # Leave space around the inclusion; even the smallest brush emits broth.
+            radius = max(radius, 3.2*d if kind == 7 else 2*d)
         grid = np.arange(-radius, radius+d/2, d)
         ox, oy = np.meshgrid(grid, grid, indexing='ij')
-        p = np.column_stack((ox.ravel()+x, oy.ravel()+y))
         keep = ox.ravel()**2+oy.ravel()**2 <= radius*radius
-        keep &= (p[:, 0] >= d/2) & (p[:, 1] >= d/2)
-        keep &= (p[:, 0] <= self.width-d/2) & (p[:, 1] <= self.height-d/2)
+        p = np.column_stack((ox.ravel()[keep]+x, oy.ravel()[keep]+y))
+        return added + self._append(p, kind, temperature)
+
+    def _append(self, p, kind, temperature, solid=False):
+        d = self.spacing
+        free = max(0, self.limit-len(self.pos))
+        if not free or not len(p):
+            return 0
+        expected = len(p)
+        keep = ((p >= d/2) & (p <= [self.width-d/2, self.height-d/2])).all(axis=1)
         p = p[keep]
         for cx, cy, cr in self.obstacles:
             if len(p):
@@ -145,9 +200,15 @@ class Simulation:
                 gap = np.min(((p[:, None, 0]-self.pos[None, :, 0])**2 +
                               (p[:, None, 1]-self.pos[None, :, 1])**2), axis=1)
                 p = p[gap >= (.88*d)**2]
+        # Reject incomplete solids instead of clipping letters at walls/obstacles.
+        if solid and (len(p) != expected or len(p) > free):
+            return 0
         p = p[:free]
         n = len(p)
         if n:
+            if solid:
+                ids = np.arange(len(self.pos), len(self.pos)+n)
+                self.groups.append((ids, p-p.mean(axis=0)))
             self.pos = np.vstack((self.pos, p))
             self.vel = np.vstack((self.vel, np.zeros((n, 2))))
             self.kind = np.r_[self.kind, np.full(n, kind, dtype=int)]
@@ -158,11 +219,17 @@ class Simulation:
         return n
 
     def scene(self, name):
-        if name not in ('empty', 'dam', 'layers'):
+        if name not in SCENES:
             raise ValueError('Unbekannte Szene')
         self.clear()
         self.last_scene = name
         if name == 'empty':
+            return
+        if name in ('diarrhea', 'clumps', 'vomit', 'soup'):
+            kind = {'diarrhea': 4, 'clumps': 5, 'vomit': 6, 'soup': 7}[name]
+            for y in (.27, .45, .63):
+                for x in np.linspace(.24, 1.56, 8):
+                    self.emit(x, y, kind, .075)
             return
         d = self.spacing
         ys = np.arange(.025, .60, d)
@@ -242,6 +309,14 @@ class Simulation:
         elif tool == 'erase':
             keep = distance > radius
             if not keep.all():
+                remap = np.cumsum(keep)-1
+                groups = []
+                for ids, rest in self.groups:
+                    survive = keep[ids]
+                    if survive.sum() > 1:
+                        shape = rest[survive]
+                        groups.append((remap[ids[survive]], shape-shape.mean(axis=0)))
+                self.groups = groups
                 for attr in ('pos', 'vel', 'kind', 'temp', 'fuel', 'burning'):
                     setattr(self, attr, getattr(self, attr)[keep])
                 self.topology += 1
@@ -336,6 +411,22 @@ class Simulation:
         vy += dt*(ay-self.gravity)
         x += dt*vx
         y += dt*vy
+        # Reduced rigid inclusions: project each particle group onto its closest
+        # rotated rest shape. Equal masses within a group preserve its centroid.
+        # Fluid pressure/drag, tools and gravity still act on every member.
+        for ids, rest in self.groups:
+            current = np.column_stack((x[ids], y[ids]))
+            center = current.mean(axis=0)
+            local = current-center
+            cosine = np.sum(rest*local)
+            sine = np.sum(rest[:, 0]*local[:, 1]-rest[:, 1]*local[:, 0])
+            angle = math.atan2(sine, cosine)
+            c, s = math.cos(angle), math.sin(angle)
+            target = rest @ np.array([[c, s], [-s, c]]) + center
+            correction = (target-current)/dt
+            vx[ids] += correction[:, 0]
+            vy[ids] += correction[:, 1]
+            x[ids], y[ids] = target[:, 0], target[:, 1]
         # Insulated walls mechanically: no penetration, dissipative impact.
         margin = self.spacing*.45
         for axis, vaxis, upper in ((x, vx, self.width), (y, vy, self.height)):

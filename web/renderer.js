@@ -27,32 +27,35 @@ class FluidRenderer {
  init(){
   const g=this.gl;
   this.splat=this.program(`#version 300 es
-   precision highp float;
+   precision highp float; precision highp int;
    layout(location=0) in vec2 position;
    layout(location=1) in float material;
    layout(location=2) in float temperature;
    layout(location=3) in float burning;
-   uniform float pixelsPerMeter; uniform float radius; uniform vec3 palette[32]; uniform float tempScale;
-   out vec3 tint; out float heat; out float fire;
+   uniform float pixelsPerMeter; uniform float radius; uniform vec3 palette[32]; uniform float tempScale; uniform float solids[32];
+   out vec3 tint; out float heat; out float fire; out float solid;
    void main(){gl_Position=vec4(position*2.0-1.0,0,1);gl_PointSize=2.0*radius*pixelsPerMeter;
-    tint=palette[int(clamp(material,0.0,31.0))];heat=temperature*tempScale;fire=burning;}
+    int k=int(clamp(material,0.0,31.0));solid=solids[k];tint=palette[k];heat=temperature*tempScale;fire=burning;}
   `,`#version 300 es
-   precision highp float;
-   in vec3 tint; in float heat; in float fire;
-   uniform int mode;out vec4 fragColor;
+   precision highp float; precision highp int;
+   in vec3 tint; in float heat; in float fire; in float solid;
+   uniform int mode; uniform int thermalView;out vec4 fragColor;
    vec3 thermal(float t){float h=clamp(0.64-t/1550.0,0.0,0.64);return clamp(abs(fract(vec3(h)+vec3(0,0.6667,0.3333))*6.0-3.0)-1.0,0.0,1.0)*0.8+0.16;}
    void main(){
+    if(mode==3 && solid<0.5)discard;
+    if(mode!=1 && mode!=3 && solid>0.5)discard;
     vec2 p=gl_PointCoord*2.0-1.0;float r2=dot(p,p);if(r2>1.0)discard;
-    vec3 c=mode==2?thermal(heat):tint;c=mix(c,vec3(1.0,0.44,0.06),fire*0.88);
-    if(mode==1){float edge=1.0-smoothstep(0.78,1.0,r2);float light=0.8+0.2*sqrt(1.0-r2);fragColor=vec4(c*light,edge);}
+    vec3 c=(mode==2 || thermalView==1)?thermal(heat):tint;c=mix(c,vec3(1.0,0.44,0.06),fire*0.88);
+    if(mode==1 || mode==3){float edge=1.0-smoothstep(0.78,1.0,r2);float light=0.8+0.2*sqrt(1.0-r2);fragColor=vec4(c*light,edge);}
     else{float density=0.30*exp(-3.0*r2)*(1.0-smoothstep(0.85,1.0,r2));fragColor=vec4(c*density,density);}
    }
   `);
   this.surface=this.program(`#version 300 es
-   precision highp float;out vec2 uv;
-   void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));uv=p;gl_Position=vec4(p*2.0-1.0,0,1);}
+   precision highp float; precision highp int;
+   layout(location=0) in vec2 corner;out vec2 uv;
+   void main(){uv=corner;gl_Position=vec4(corner*2.0-1.0,0,1);}
   `,`#version 300 es
-   precision highp float;
+   precision highp float; precision highp int;
    in vec2 uv;out vec4 fragColor;
    uniform sampler2D densityMap;uniform vec2 resolution;uniform vec2 world;
    uniform int fluid;uniform vec3 brush;uniform int obstacleCount;uniform vec3 obstacles[30];
@@ -78,7 +81,7 @@ class FluidRenderer {
    }
   `);
   this.uniforms=new Map();
-  this.palette=new Float32Array(96);
+  this.palette=new Float32Array(96);this.solids=new Float32Array(32);
   this.vao=g.createVertexArray();g.bindVertexArray(this.vao);
   this.buffer=g.createBuffer();g.bindBuffer(g.ARRAY_BUFFER,this.buffer);
   // Server layout, 8 bytes: uint16 x, uint16 y, uint16 temp, uint8 kind, uint8 burning.
@@ -87,8 +90,12 @@ class FluidRenderer {
    [0,2,g.UNSIGNED_SHORT,true,0],[2,1,g.UNSIGNED_SHORT,true,4],
    [1,1,g.UNSIGNED_BYTE,false,6],[3,1,g.UNSIGNED_BYTE,true,7]]){
    g.enableVertexAttribArray(loc);g.vertexAttribPointer(loc,size,type,normalized,8,offset);}
-  g.bindVertexArray(null);this.emptyVao=g.createVertexArray();
-  this.capacity=0;
+  this.emptyVao=g.createVertexArray();g.bindVertexArray(this.emptyVao);
+  this.corners=g.createBuffer();g.bindBuffer(g.ARRAY_BUFFER,this.corners);
+  g.bufferData(g.ARRAY_BUFFER,new Float32Array([0,0,2,0,0,2]),g.STATIC_DRAW);
+  g.enableVertexAttribArray(0);g.vertexAttribPointer(0,2,g.FLOAT,false,0,0);
+  g.bindVertexArray(null);g.bindBuffer(g.ARRAY_BUFFER,null);
+  this.capacity=0;this.allocated=false;
   this.texture=g.createTexture();g.bindTexture(g.TEXTURE_2D,this.texture);
   g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MIN_FILTER,g.LINEAR);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MAG_FILTER,g.LINEAR);
   g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_S,g.CLAMP_TO_EDGE);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_T,g.CLAMP_TO_EDGE);
@@ -102,17 +109,17 @@ class FluidRenderer {
   // Device pixel ratio is capped: fill rate, not geometry, limits this renderer.
   const d=Math.min(devicePixelRatio||1,1.5)*(scale||this.scale||1);
   const max=g.getParameter(g.MAX_TEXTURE_SIZE),w=Math.max(1,Math.min(max,Math.round(r.width*d))),h=Math.max(1,Math.min(max,Math.round(r.height*d)));
-  if(w===this.canvas.width&&h===this.canvas.height)return;
-  this.scale=scale||this.scale||1;this.canvas.width=w;this.canvas.height=h;
+  if(this.allocated&&w===this.canvas.width&&h===this.canvas.height)return;
+  this.allocated=true;this.scale=scale||this.scale||1;this.canvas.width=w;this.canvas.height=h;
   this.fieldWidth=Math.max(1,Math.round(w*this.density));this.fieldHeight=Math.max(1,Math.round(h*this.density));
   g.bindTexture(g.TEXTURE_2D,this.texture);
   g.texImage2D(g.TEXTURE_2D,0,g.RGBA8,this.fieldWidth,this.fieldHeight,0,g.RGBA,g.UNSIGNED_BYTE,null);
   g.bindFramebuffer(g.FRAMEBUFFER,this.fbo);if(g.checkFramebufferStatus(g.FRAMEBUFFER)!==g.FRAMEBUFFER_COMPLETE)throw Error('WebGL Renderziel unvollständig');g.bindFramebuffer(g.FRAMEBUFFER,null);
  }
  setPalette(materials){
-  const key=materials.map(m=>m.color).join('');if(key===this.paletteKey)return;this.paletteKey=key;
-  materials.slice(0,32).forEach((m,i)=>{for(let k=0;k<3;k++)this.palette[i*3+k]=parseInt(m.color.slice(1+k*2,3+k*2),16)/255;});
-  const g=this.gl;g.useProgram(this.splat);g.uniform3fv(this.u(this.splat,'palette[0]'),this.palette);
+  const key=materials.map(m=>m.color+m.render).join('');if(key===this.paletteKey)return;this.paletteKey=key;
+  materials.slice(0,32).forEach((m,i)=>{this.solids[i]=m.render==='solid'?1:0;for(let k=0;k<3;k++)this.palette[i*3+k]=parseInt(m.color.slice(1+k*2,3+k*2),16)/255;});
+  const g=this.gl;g.useProgram(this.splat);g.uniform3fv(this.u(this.splat,'palette[0]'),this.palette);g.uniform1fv(this.u(this.splat,'solids[0]'),this.solids);
  }
  // buffer: Uint8Array in the server's 8-byte layout, already interpolated.
  upload(buffer,count,stamp){
@@ -124,14 +131,15 @@ class FluidRenderer {
  particles(state,mode){
   const g=this.gl,p=this.splat;g.useProgram(p);g.bindVertexArray(this.vao);
   g.uniform1f(this.u(p,'tempScale'),65535/40);
-  g.uniform1f(this.u(p,'pixelsPerMeter'),(mode===1?this.canvas.width:this.fieldWidth)/1.8);
-  g.uniform1f(this.u(p,'radius'),(state?.spacing||.015)*(mode===1?.26:1.5));g.uniform1i(this.u(p,'mode'),mode);
+  g.uniform1f(this.u(p,'pixelsPerMeter'),((mode===1||mode===3)?this.canvas.width:this.fieldWidth)/1.8);
+  g.uniform1f(this.u(p,'radius'),(state?.spacing||.015)*(mode===1?.26:mode===3?.76:1.5));g.uniform1i(this.u(p,'mode'),mode);
   g.drawArrays(g.POINTS,0,this.count);
  }
  draw(state,view,cursor,radius){
   if(this.lost||!state)return;
   const g=this.gl,w=this.canvas.width,h=this.canvas.height,mode=view==='particles'?1:view==='thermal'?2:0;
   this.setPalette(state.materials);
+  g.useProgram(this.splat);g.uniform1i(this.u(this.splat,'thermalView'),mode===2?1:0);
   // Explicitly unbind the sample texture while it is a render target.
   g.bindTexture(g.TEXTURE_2D,null);
   if(mode!==1){
@@ -148,6 +156,6 @@ class FluidRenderer {
   const obstacles=state.obstacles||[];g.uniform1i(this.u(p,'obstacleCount'),obstacles.length);
   if(obstacles.length||this.hadObstacles){const obs=new Float32Array(90);obstacles.forEach((o,i)=>obs.set(o,i*3));g.uniform3fv(this.u(p,'obstacles[0]'),obs);this.hadObstacles=obstacles.length>0;}
   g.drawArrays(g.TRIANGLES,0,3);
-  if(mode===1){g.enable(g.BLEND);g.blendFunc(g.SRC_ALPHA,g.ONE_MINUS_SRC_ALPHA);this.particles(state,mode);g.disable(g.BLEND);}
+  g.enable(g.BLEND);g.blendFunc(g.SRC_ALPHA,g.ONE_MINUS_SRC_ALPHA);this.particles(state,mode===1?1:3);g.disable(g.BLEND);
  }
 }

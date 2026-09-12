@@ -16,7 +16,7 @@ import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from physics import Simulation, Material, RESOLUTIONS, cKDTree
+from physics import Simulation, Material, RESOLUTIONS, SCENES, PRESETS, cKDTree
 
 VERSION = '2.0'
 STREAM_SECONDS = 120          # bounded so proxy read timeouts never cut a frame
@@ -137,7 +137,7 @@ def build_commands(data):
     if action not in (None, 'scene', 'pause', 'material', 'single', 'resolution'):
         raise ValueError('Unbekannte Aktion')
     scene = data.get('scene')
-    if action == 'scene' and scene not in ('empty', 'dam', 'layers'):
+    if action == 'scene' and scene not in SCENES:
         raise ValueError('Unbekannte Szene')
     resolution = data.get('resolution')
     if action == 'resolution' and resolution not in RESOLUTIONS:
@@ -174,7 +174,7 @@ def build_commands(data):
         elif action == 'material':
             if len(sim.materials) >= 32:
                 raise ValueError('Maximal 32 Materialien')
-            sim.materials.append(Material('Eigenes '+str(len(sim.materials)-3), '#69e8bc',
+            sim.materials.append(Material('Eigenes '+str(len(sim.materials)-len(PRESETS)+1), '#69e8bc',
                                           material[0], material[1], material[2],
                                           material[3], 2500, material[4]))
         if shot:
