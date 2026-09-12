@@ -12,6 +12,7 @@ otherwise; the previous Python-level cell loop is gone.
 from dataclasses import dataclass, asdict
 import math
 import numpy as np
+from containers import ASSETS, outlines, boundary, collide
 
 try:
     from scipy.spatial import cKDTree
@@ -29,6 +30,9 @@ class Material:
     ignition: float
     heat_capacity: float
     cohesion: float
+    # Radiuswachstum eines Aetzlochs in m/s bei 20 C. 0 = greift nichts an.
+    corrosion: float = 0.
+    group: str = 'Flüssigkeiten'
     render: str = "fluid"
     selectable: bool = True
     description: str = ""
@@ -40,18 +44,70 @@ PRESETS = [
     Material('Alkohol', '#c397ff', 789, .0012, 1, 365, 2440, .022),
     Material('Sirup', '#f07185', 1380, 3, 0, 500, 2500, .08),
     Material('Durchfall', '#927132', 1030, .035, 0, 500, 3800, .025,
-             description='Dünnflüssig, braun und leicht zäh.'),
+             group='Ekliges', description='Dünnflüssig, braun und leicht zäh.'),
     Material('Kot-Klumpen', '#65412b', 1080, 4, 0, 500, 2400, .12,
-             render='solid', description='Zusammenhängende Klumpen, die fallen und sich drehen.'),
+             group='Ekliges', render='solid',
+             description='Zusammenhängende Klumpen, die fallen und sich drehen.'),
     Material('Erbrochenes', '#a6a044', 1020, .18, 0, 500, 3600, .045,
-             description='Zähe Flüssigkeit mit orangefarbenen Speisestückchen.'),
+             group='Ekliges', description='Zähe Flüssigkeit mit orangefarbenen Speisestückchen.'),
     Material('Buchstabensuppe', '#ba5825', 1005, .008, 0, 500, 4000, .025,
-             description='Rote Brühe mit hellen Nudelbuchstaben A, E, F, H, L, O, P, U.'),
+             group='Ekliges', description='Rote Brühe mit hellen Nudelbuchstaben A, E, F, H, L, O, P, U.'),
     Material('Speisestückchen', '#e9ab66', 1060, 1.5, 0, 500, 2800, .10,
-             render='solid', selectable=False),
+             group='Ekliges', render='solid', selectable=False),
     Material('Buchstabennudeln', '#ffe4a0', 1040, .8, 0, 500, 2800, .10,
-             render='solid', selectable=False),
+             group='Ekliges', render='solid', selectable=False),
+    # ------------------------------------------------------------- Getränke
+    Material('Kaffee', '#4b2a17', 1002, .0013, 0, 500, 4050, .062,
+             group='Getränke',
+             description='Heisser schwarzer Kaffee, kaum dicker als Wasser.'),
+    Material('Cola', '#2d150c', 1044, .0017, 0, 500, 3800, .055,
+             group='Getränke',
+             description='Gezuckert, dadurch etwas dichter und zäher als Wasser.'),
+    # --------------------------------------------------------------- Säuren
+    # corrosion ist ein Spielparameter, keine kalibrierte Korrosionsrate. Die
+    # Rangfolge folgt aber dem, was die Stoffe real mit Glas, Keramik und
+    # Metall anstellen: Flusssäure frisst Glas, Blausäure praktisch nichts.
+    Material('Schwefelsäure', '#d9cf62', 1830, .0248, 0, 500, 1380, .075,
+             corrosion=.012, group='Säuren',
+             description='96 %, ölig und sehr dicht. Frisst Löcher und wird beim '
+                         'Erhitzen deutlich schneller.'),
+    Material('Salzsäure', '#a8e6b4', 1180, .0019, 0, 500, 2550, .058,
+             corrosion=.008, group='Säuren',
+             description='37 %, dünnflüssig. Greift Metall und Kalk an, Glas kaum.'),
+    Material('Salpetersäure', '#f2c266', 1510, .00092, 0, 500, 1720, .050,
+             corrosion=.011, group='Säuren',
+             description='Rauchend, gelblich. Ätzt zügig durch die Gefässwand.'),
+    Material('Flusssäure', '#bfe9ff', 1150, .00098, 0, 500, 2500, .048,
+             corrosion=.020, group='Säuren',
+             description='Löst als einzige Säure Glas und Keramik. Hier die '
+                         'aggressivste Flüssigkeit im Becken.'),
+    Material('Königswasser', '#e8863c', 1210, .0011, 0, 500, 2300, .052,
+             corrosion=.016, group='Säuren',
+             description='Salzsäure und Salpetersäure 3:1, löst sogar Gold.'),
+    Material('Blausäure', '#cfe4d8', 687, .00018, 0, 500, 2610, .030,
+             corrosion=.0004, group='Säuren',
+             description='Berüchtigt, aber chemisch eine sehr schwache Säure: '
+                         'sie greift die Gefässe fast nicht an.'),
+    Material('Natronlauge', '#9fb9ff', 1525, .0042, 0, 500, 3100, .066,
+             corrosion=.006, group='Säuren',
+             description='Keine Säure, sondern Lauge — ätzt trotzdem, '
+                         'besonders Aluminium und Glas.'),
 ]
+
+INDEX = {m.name: i for i, m in enumerate(PRESETS)}
+CLUMP, VOMIT, SOUP = INDEX['Kot-Klumpen'], INDEX['Erbrochenes'], INDEX['Buchstabensuppe']
+CHUNK, NOODLE = INDEX['Speisestückchen'], INDEX['Buchstabennudeln']
+
+# Ätzlöcher: Kreise, in denen die Gefässwand weg ist. Sie halten die Kollision
+# und die Darstellung auf demselben Stand, ohne die Polygone neu zu vernetzen.
+MAX_HOLES = 32
+HOLE_START = .004          # frischer Ätzpunkt, noch dicht
+HOLE_SPACING = .10         # Mindestabstand zwischen zwei Ätzstellen
+HOLE_MAX = .075
+# Bis hierhin ist die Mulde nur eine Delle in der Wandstärke; erst darüber
+# geht sie durch und lässt Flüssigkeit hindurch.
+HOLE_OPEN = .018
+NEW_SPOT_CHANCE = .08      # Fraß breitet sich aus, statt überall zugleich zu starten
 
 SCENES = ('empty', 'dam', 'layers', 'diarrhea', 'clumps', 'vomit', 'soup')
 # Particle silhouettes; connected strokes stay together through shape matching.
@@ -100,6 +156,9 @@ class Simulation:
         self.groups = []
         self.letter_index = 0
         self.obstacles = []
+        self.container = None
+        self.container_polygons = []
+        self.holes = []
         self.topology += 1
 
     def set_resolution(self, name):
@@ -108,7 +167,106 @@ class Simulation:
         self.resolution = name
         self.spacing = RESOLUTIONS[name]
         self.h = self.spacing*2.5
+        container = self.container
         self.scene(self.last_scene)
+        if container:
+            self.set_container(container)
+
+    def set_container(self, key):
+        if key not in ASSETS:
+            raise ValueError('Unbekanntes Gefäß')
+        self.clear()
+        self.last_scene = 'empty'
+        self.container = key
+        self.container_polygons = outlines(key)
+
+    def empty_container(self):
+        key = self.container
+        if key:
+            self.set_container(key)
+        else:
+            self.scene('empty')
+
+    def open_holes(self):
+        """Nur die Ätzstellen, die schon ganz durch die Wand gehen."""
+        return [[x, y, r-HOLE_OPEN] for x, y, r in self.holes if r > HOLE_OPEN]
+
+    def _in_holes(self, points):
+        """Maske: Punkte, an denen die Gefässwand bereits durchgefressen ist."""
+        holes = self.open_holes()
+        if not holes or not len(points):
+            return np.zeros(len(points), dtype=bool)
+        h = np.asarray(holes, dtype=float)
+        return (np.hypot(points[:, None, 0]-h[None, :, 0],
+                         points[:, None, 1]-h[None, :, 1]) < h[None, :, 2]).any(axis=1)
+
+    def _corrode(self, duration):
+        """Säuren fressen Löcher in Gefässwand und Hindernisse.
+
+        Ein Loch ist ein Kreis auf der Wand: die Kollision lässt Partikel dort
+        durch, der Shader schneidet dieselbe Scheibe aus dem Gefäss heraus.
+        Warme Säure ätzt schneller, gedeckelt bei dreifachem Tempo.
+        """
+        if not len(self.pos) or not (self.container_polygons or self.obstacles):
+            return
+        rate = np.array([m.corrosion for m in self.materials])[self.kind]
+        active = rate > 0
+        if not active.any():
+            return
+        pts = self.pos[active]
+        strength = rate[active]*(1.+np.clip(self.temp[active]-20., 0, 300)/150.)
+        contact = self.spacing*1.4
+        peak = float(strength.max())
+        for polygon in self.container_polygons:
+            lo, hi = polygon.min(axis=0)-contact, polygon.max(axis=0)+contact
+            near_box = np.flatnonzero((pts[:, 0] >= lo[0]) & (pts[:, 0] <= hi[0]) &
+                                      (pts[:, 1] >= lo[1]) & (pts[:, 1] <= hi[1]))
+            if not len(near_box):
+                continue
+            distance, q, _ = boundary(pts[near_box], polygon)
+            touch = distance < contact
+            if not touch.any():
+                continue
+            self._etch(q[touch], strength[near_box][touch]*duration, contact, peak*duration)
+        for k in range(len(self.obstacles)-1, -1, -1):
+            cx, cy, cr = self.obstacles[k]
+            gap = np.hypot(pts[:, 0]-cx, pts[:, 1]-cy)-cr
+            hit = (gap > -contact) & (gap < contact)
+            if not hit.any():
+                continue
+            cr -= duration*float(strength[hit].max())*1.6
+            if cr <= self.spacing:
+                self.obstacles.pop(k)
+            else:
+                self.obstacles[k][2] = cr
+
+    def _etch(self, points, amount, contact, cap):
+        """Vorhandene Löcher vergrössern, sonst einen neuen Ätzpunkt setzen."""
+        fresh = np.ones(len(points), dtype=bool)
+        if self.holes:
+            h = np.asarray(self.holes, dtype=float)
+            gap = (np.hypot(points[:, None, 0]-h[None, :, 0],
+                            points[:, None, 1]-h[None, :, 1])-h[None, :, 2])
+            nearest = np.argmin(gap, axis=1)
+            known = gap[np.arange(len(points)), nearest] < contact
+            fresh = ~known
+            if known.any():
+                # Deckel pro Bild: viel Säure ätzt breiter, nicht schlagartig tiefer.
+                grown = np.minimum(np.bincount(nearest[known], amount[known],
+                                               minlength=len(h)), cap)
+                h[:, 2] = np.minimum(h[:, 2]+grown, HOLE_MAX)
+                self.holes = h.tolist()
+        # Höchstens eine neue Stelle pro Aufruf und nur gelegentlich: der Frass
+        # wandert dadurch über die Wand, statt sie sofort gleichmässig zu lochen.
+        if len(self.holes) >= MAX_HOLES or not fresh.any() or self.rng.random() > NEW_SPOT_CHANCE:
+            return
+        for point in points[fresh]:
+            if self.holes:
+                h = np.asarray(self.holes, dtype=float)
+                if float(np.min(np.hypot(h[:, 0]-point[0], h[:, 1]-point[1])-h[:, 2])) < HOLE_SPACING:
+                    continue
+            self.holes.append([float(point[0]), float(point[1]), HOLE_START])
+            return
 
     def _properties(self):
         self.rho0 = np.array([m.density for m in self.materials])[self.kind]
@@ -147,7 +305,7 @@ class Simulation:
         if not 0 <= kind < len(self.materials):
             raise ValueError('Unbekanntes Material')
         d = self.spacing
-        if kind == 5:
+        if kind == CLUMP:
             # One compact oval per brush application, independent of liquid grid.
             r = min(radius, .06)
             grid = np.arange(-r, r+d/2, d)
@@ -156,24 +314,24 @@ class Simulation:
             return self._append(np.column_stack((gx[mask]+x, gy[mask]+y)),
                                 kind, temperature, solid=True)
         added = 0
-        if kind in (6, 7):
-            if kind == 7:
+        if kind in (VOMIT, SOUP):
+            if kind == SOUP:
                 glyph = LETTERS[self.letter_index % len(LETTERS)].split('/')
                 offsets = np.array([(col-1, 2-row) for row, line in enumerate(glyph)
                                     for col, value in enumerate(line) if value == '1'])
-                ingredient = 9
+                ingredient = NOODLE
             else:
                 offsets = np.array([[-.5, -.5], [.5, -.5], [-.5, .5], [.5, .5]])
-                ingredient = 8
+                ingredient = CHUNK
             angle = self.rng.uniform(-.65, .65)
             rotation = np.array([[np.cos(angle), -np.sin(angle)],
                                  [np.sin(angle), np.cos(angle)]])
             pts = offsets @ rotation.T*d + [x, y]
             added = self._append(pts, ingredient, temperature, solid=True)
-            if added and kind == 7:
+            if added and kind == SOUP:
                 self.letter_index += 1
             # Leave space around the inclusion; even the smallest brush emits broth.
-            radius = max(radius, 3.2*d if kind == 7 else 2*d)
+            radius = max(radius, 3.2*d if kind == SOUP else 2*d)
         grid = np.arange(-radius, radius+d/2, d)
         ox, oy = np.meshgrid(grid, grid, indexing='ij')
         keep = ox.ravel()**2+oy.ravel()**2 <= radius*radius
@@ -191,6 +349,9 @@ class Simulation:
         for cx, cy, cr in self.obstacles:
             if len(p):
                 p = p[np.hypot(p[:, 0]-cx, p[:, 1]-cy) >= cr+d/2]
+        for polygon in self.container_polygons:
+            if len(p):
+                p = p[(boundary(p, polygon)[0] >= d/2) | self._in_holes(p)]
         if len(p) and len(self.pos):
             # Vectorised overlap rejection against existing particles.
             if cKDTree is not None:
@@ -226,7 +387,8 @@ class Simulation:
         if name == 'empty':
             return
         if name in ('diarrhea', 'clumps', 'vomit', 'soup'):
-            kind = {'diarrhea': 4, 'clumps': 5, 'vomit': 6, 'soup': 7}[name]
+            kind = {'diarrhea': INDEX['Durchfall'], 'clumps': CLUMP,
+                    'vomit': VOMIT, 'soup': SOUP}[name]
             for y in (.27, .45, .63):
                 for x in np.linspace(.24, 1.56, 8):
                     self.emit(x, y, kind, .075)
@@ -346,6 +508,7 @@ class Simulation:
         self.substeps = taken
         self.pos = np.column_stack((x, y))
         self.vel = np.column_stack((vx, vy))
+        self._corrode(duration)
 
     def _step(self, dt, x, y, vx, vy):
         n = x.size
@@ -454,6 +617,7 @@ class Simulation:
             hit = inside & (speed < 0)
             vx[hit] -= 1.08*speed[hit]*nxs[hit]
             vy[hit] -= 1.08*speed[hit]*nys[hit]
+        collide(x, y, vx, vy, self.container_polygons, margin, self.open_holes())
         # Accelerated effective heat diffusion, equal and opposite energy exchange.
         heat = (c_heat*q2)*(self.temp[j]-self.temp[i])*dt
         energy = np.bincount(i, heat, minlength=n)-np.bincount(j, heat, minlength=n)
@@ -492,8 +656,10 @@ class Simulation:
         return out.tobytes()
 
     def meta(self):
-        return {'time': round(self.time, 3), 'paused': self.paused, 'count': len(self.pos),
-                'limit': self.limit, 'obstacles': self.obstacles, 'width': self.width,
+        return {'time': round(self.time, 3), 'gravity': self.gravity, 'paused': self.paused, 'count': len(self.pos),
+                'container': self.container, 'limit': self.limit, 'obstacles': self.obstacles,
+                'holes': [[round(v, 4) for v in hole] for hole in self.holes],
+                'holes_open': len(self.open_holes()), 'width': self.width,
                 'height': self.height, 'spacing': self.spacing, 'resolution': self.resolution,
                 'topology': self.topology, 'substeps': self.substeps, 'stride': self.STRIDE,
                 'materials': [asdict(m) for m in self.materials],

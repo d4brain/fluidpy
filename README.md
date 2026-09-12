@@ -1,3 +1,19 @@
+# Neu: Getränke und Säuren, die Gefässe durchfressen
+
+Kaffee und Cola als weitere Flüssigkeiten. Dazu sieben ätzende Stoffe —
+Schwefelsäure, Salzsäure, Salpetersäure, Flusssäure, Königswasser, Blausäure
+und Natronlauge — die die Wand des gewählten Gefässes anfressen, durchlöchern
+und den Inhalt auslaufen lassen. Details unten unter „Erweiterung: Säuren und
+Korrosion“.
+
+# Neu in 2.2: Speichern und Teilen
+
+Kreationen mit Screenshot speichern und per Link teilen. PNG-Export für Beiträge und Stories. Update-Anleitung für fluid.occdn.com und dauerhafte Speicherung: [SHARING.md](SHARING.md).
+
+# Neu: befüllbare Gefäße
+
+Kaffeetasse, Trinkglas, Toilette, Schüssel und Eimer aus Blender sind unter dem Becken auswählbar. Details und Blender-Dateien: [ASSETS.md](ASSETS.md).
+
 # FluidPy
 
 Lokale 2D-Fluidsimulation: **Python berechnet die Physik**, WebGL 2 zeichnet
@@ -270,6 +286,7 @@ Konvergenzstudie oder experimentelle Validierung.
 - `physics.py`: Python/NumPy-Solver, optional SciPy-Nachbarsuche.
 - `web/`: HTML5-Oberfläche, CSS und Canvas-Zeichnung.
 - `test_physics.py`: numerische Regressionstests.
+- `test_acids.py`: Ätzlöcher, Durchlass, Hindernisauflösung, Persistenz.
 - `start.bat`: Windows-Start mit isolierter Python-Umgebung.
 - `Dockerfile`, `docker-compose.yml`: Containerbetrieb hinter einem Reverse Proxy.
 - `docker-compose.traefik.yml`: Veröffentlichung von fluid.occdn.com über Traefik.
@@ -302,6 +319,46 @@ Wiederherstellung des WebGL-Kontexts werden behandelt.
 
 API-Hintergrund: https://developer.mozilla.org/en-US/docs/Web/API/WebGL2RenderingContext
 
+
+## Erweiterung: Säuren und Korrosion
+
+Die Materialliste ist in **Flüssigkeiten**, **Ekliges**, **Getränke** und
+**Säuren** gegliedert. Neu sind:
+
+- **Kaffee** (1002 kg/m³, 0,0013 Pa·s) und **Cola** (1044 kg/m³, 0,0017 Pa·s).
+  Cola ist durch den Zucker etwas dichter und zäher; beide greifen nichts an.
+- **Schwefelsäure** 96 % (1830 kg/m³, 0,0248 Pa·s): dicht und ölig.
+- **Salzsäure** 37 %, **Salpetersäure** (rauchend), **Königswasser** (3:1).
+- **Flusssäure**: die einzige Säure, die real Glas löst — hier die aggressivste.
+- **Blausäure**: berüchtigt, chemisch aber eine sehr schwache Säure. Sie
+  hinterlässt nur Ätzspuren und geht praktisch nie durch die Wand.
+- **Natronlauge**: keine Säure, sondern Lauge; ätzt trotzdem.
+
+### Wie das Durchfressen funktioniert
+
+Jede Säure hat eine Ätzrate `corrosion` in Metern Lochradius pro Sekunde.
+Liegt Säure an der Gefässwand an (Abstand < 1,4 Partikelabstände), entsteht dort
+eine Ätzstelle: ein Kreis auf der Wand. Bestehende Stellen wachsen weiter, neue
+entstehen nur vereinzelt und mit mindestens 10 cm Abstand, damit der Frass über
+die Wand wandert, statt sie gleichmässig zu lochen. Höchstens 32 Stellen,
+maximal 7,5 cm Radius.
+
+Bis 1,8 cm Radius ist die Stelle nur eine Mulde in der Wandstärke — sichtbar,
+aber noch dicht. Erst darüber geht sie durch: die Kollision lässt Partikel in
+diesem Kreis passieren, und derselbe Kreis wird im Shader aus dem Gefäss
+herausgeschnitten, mit dunkelgrün angefressenem Rand. Die Statuszeile zeigt
+erst „GEFÄSS WIRD ANGEÄTZT“, dann die Zahl der durchgefressenen Löcher.
+
+Warme Säure ätzt schneller, gedeckelt bei dreifachem Tempo — das Werkzeug
+„Erhitzen“ beschleunigt den Angriff spürbar. Gesetzte Hindernisse schrumpfen
+unter Säure und verschwinden, wenn ihr Radius unter den Partikelabstand fällt.
+„Gefäss ausleeren“ und jede neue Gefässwahl stellen die Wand wieder her;
+gespeicherte Kreationen behalten ihre Löcher.
+
+Die Ätzraten sind Spielwerte, keine kalibrierten Korrosionsdaten. Die Rangfolge
+folgt dem realen Verhalten der Stoffe gegenüber Glas, Keramik und Metall, die
+absoluten Zeiten nicht. Es gibt keine Reaktionsprodukte, keine Verdünnung, keine
+Wärmetönung und keinen Säureverbrauch: eine Säure ätzt unbegrenzt weiter.
 
 ## Erweiterung: Klumpen, Stückchen und Buchstabensuppe
 

@@ -1,7 +1,7 @@
 services:
   fluidpy:
     build: .
-    image: fluidpy:2.0
+    image: fluidpy:2.2
     container_name: fluidpy
     restart: unless-stopped
     init: true
@@ -13,7 +13,13 @@ services:
     ports:
       - "127.0.0.1:${FLUIDPY_PORT:-8765}:8765"
 
-    # Der Prozess schreibt keine Dateien.
+    environment:
+      FLUIDPY_PUBLIC_URL: ${FLUIDPY_PUBLIC_URL:-https://fluid.occdn.com}
+      FLUIDPY_DATA_DIR: /app/data
+    volumes:
+      - fluidpy-shares:/app/data
+
+    # Nur das Datenvolume ist beschreibbar.
     read_only: true
     tmpfs:
       - /tmp:size=16m
@@ -45,3 +51,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  fluidpy-shares:

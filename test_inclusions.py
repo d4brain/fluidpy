@@ -77,7 +77,9 @@ class InclusionTests(unittest.TestCase):
 
     def test_selection_and_custom_material(self):
         s = Simulation()
-        self.assertEqual(sum(m.selectable for m in PRESETS), 8)
+        hidden = [m.name for m in PRESETS if not m.selectable]
+        self.assertEqual(hidden, ['Speisestückchen', 'Buchstabennudeln'])
+        self.assertEqual(sum(m.selectable for m in PRESETS), len(PRESETS)-2)
         build_commands({'action':'material'})(s)
         self.assertEqual(s.materials[-1].name, 'Eigenes 1')
         s.emit(.5, .5, len(s.materials)-1)

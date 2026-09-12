@@ -5,6 +5,7 @@ import time
 import unittest
 from http.client import HTTPConnection
 from app import create_server
+from physics import PRESETS
 
 
 class HttpTests(unittest.TestCase):
@@ -68,13 +69,13 @@ class HttpTests(unittest.TestCase):
                 time.sleep(.01)
             if kind in (6, 7):
                 self.assertIn(kind+2, kinds)
-            self.assertEqual(len(meta['materials']), 10)
+            self.assertEqual(len(meta['materials']), len(PRESETS))
 
     def test_invalid_scene_and_static_files(self):
         status, body = self.request('POST', '/api/step', {'action':'scene','scene':'invalid'})
         self.assertEqual(status, 400)
         self.assertIn('error', json.loads(body))
-        for path in ('/', '/app.js', '/renderer.js', '/style.css'):
+        for path in ('/', '/app.js', '/renderer.js', '/style.css', '/assets/vessels.json'):
             status, body = self.request('GET', path)
             self.assertEqual(status, 200)
             self.assertTrue(body)

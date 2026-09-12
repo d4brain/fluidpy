@@ -5,6 +5,8 @@ try{renderer=new FluidRenderer(canvas);}catch(error){console.error(error);
  $('status').textContent='RENDERER: '+error.message;$('rendererInfo').textContent='WEBGL FEHLER';
  const note=document.createElement('p');note.className='intro hint';note.style.color='#ff9a8a';
  note.textContent='WebGL-Fehler: '+error.message;document.querySelector('.tank').after(note);}
+let saving=false,inputBusy=false;
+const sharedId=/^\/s\/([A-Za-z0-9_-]{22})$/.exec(location.pathname)?.[1];
 let state=null,kind=0,tool='emit',pointer=null,cursor=null,last=null,commands=[];
 // Two most recent solver frames; rendering interpolates between them so the
 // picture stays smooth even when the Python solver publishes below 60 Hz.
@@ -17,19 +19,27 @@ function materialUI(){
  if(!state)return;
  if(materialCount!==state.materials.length){
   materialCount=state.materials.length;$('materials').replaceChildren();
-  state.materials.forEach((m,i)=>{if(m.selectable===false)return;const b=document.createElement('button');b.className='material';b.dataset.kind=i;b.title=m.description||m.name;const dot=document.createElement('span');dot.className='swatch';dot.style.background=m.color;b.append(dot,document.createTextNode(m.name));b.onclick=()=>{kind=i;materialUI();};$('materials').append(b);});
+  let group=null;
+  state.materials.forEach((m,i)=>{if(m.selectable===false)return;
+   const label=m.group||'Weitere';
+   if(label!==group){group=label;const h=document.createElement('h3');h.textContent=label;$('materials').append(h);}
+   const b=document.createElement('button');b.className='material';b.dataset.kind=i;b.title=m.description||m.name;
+   const dot=document.createElement('span');dot.className='swatch';dot.style.background=m.color;
+   b.append(dot,document.createTextNode(m.name));b.onclick=()=>{kind=i;materialUI();};$('materials').append(b);});
  }
- [...$('materials').children].forEach(b=>{const selected=+b.dataset.kind===kind;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',selected);});
- const m=state.materials[kind];$('materialHint').textContent=m.description||'Flüssigkeit mit einstellbarer Einfülltemperatur.';$('rhoInfo').textContent=m.density+' kg/m³';$('muInfo').textContent=m.viscosity+' Pa·s';$('fireInfo').textContent=m.flammability?Math.round(m.flammability*100)+' % · ab '+m.ignition+' °C':'Nein';
+ $('materials').querySelectorAll('.material').forEach(b=>{const selected=+b.dataset.kind===kind;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',selected);});
+ const m=state.materials[kind];$('materialHint').textContent=m.description||'Flüssigkeit mit einstellbarer Einfülltemperatur.';$('rhoInfo').textContent=m.density+' kg/m³';$('muInfo').textContent=m.viscosity+' Pa·s';$('fireInfo').textContent=m.flammability?Math.round(m.flammability*100)+' % · ab '+m.ignition+' °C':'Nein';$('acidInfo').textContent=m.corrosion?(m.corrosion*1000).toFixed(1)+' mm/s':'Keine';
  $('toolLabel').textContent=tool==='emit'?m.name.toUpperCase()+' EINGIESSEN':({stir:'FLÜSSIGKEIT RÜHREN',heat:'ERHITZEN / ZÜNDEN',cool:'FLÜSSIGKEIT KÜHLEN',obstacle:'HINDERNIS SETZEN',erase:'PARTIKEL ENTFERNEN'})[tool];
 }
-function command(action,extra={}){commands.push({action,...extra});}
+function command(action,extra={}){if(saving||sharedId)return;commands.push({action,...extra});}
 document.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>{tool=b.dataset.tool;document.querySelectorAll('[data-tool]').forEach(t=>{t.classList.toggle('selected',t===b);t.setAttribute('aria-pressed',t===b);});materialUI();});
 document.querySelectorAll('[data-scene]').forEach(b=>b.onclick=()=>{const scene=b.dataset.scene;const selected={diarrhea:4,clumps:5,vomit:6,soup:7}[scene];if(selected!==undefined){kind=selected;materialUI();}command('scene',{scene});});
+document.querySelectorAll('[data-container]').forEach(b=>b.onclick=()=>command('container',{container:b.dataset.container}));
+$('emptyContainer').onclick=()=>command('empty_container');
 $('pause').onclick=()=>command('pause');$('single').onclick=()=>command('single');$('clear').onclick=()=>command('scene',{scene:'empty'});
 $('resolution').onchange=()=>command('resolution',{resolution:$('resolution').value});
 $('quality').onchange=()=>{if(renderer)renderer.resize(+$('quality').value);};
-document.addEventListener('keydown',e=>{if(e.code==='Space'&&!['INPUT','SELECT','BUTTON','SUMMARY'].includes(document.activeElement.tagName)){e.preventDefault();command('pause');}});
+document.addEventListener('keydown',e=>{if(!sharedId&&!$('shareDialog').open&&e.code==='Space'&&!['INPUT','SELECT','BUTTON','SUMMARY'].includes(document.activeElement.tagName)){e.preventDefault();command('pause');}});
 for(const [id,out,suffix,mul] of [['radius','radiusValue',' cm',1],['temperature','tempValue',' °C',1],['gravity','gravityValue',' m/s²',1],['flammability','flameValue',' %',100]])$(id).oninput=()=>$(out).textContent=+(+$(id).value*mul).toFixed(2)+suffix;
 $('create').onclick=()=>{
  const data={};for(const id of ['density','viscosity','flammability','ignition','cohesion']){if(!$(id).reportValidity())return;data[id]=+$(id).value;}
@@ -37,7 +47,7 @@ $('create').onclick=()=>{
 };
 function point(e){const r=canvas.getBoundingClientRect();return{x:Math.max(0,Math.min(1.8,(e.clientX-r.left)/r.width*1.8)),y:Math.max(0,Math.min(1.1,(1-(e.clientY-r.top)/r.height)*1.1))};}
 function brush(){return{kind,tool,radius:+$('radius').value/100,temperature:+$('temperature').value};}
-canvas.onpointerdown=e=>{if(e.button!==0)return;canvas.setPointerCapture(e.pointerId);pointer=point(e);cursor=pointer;last={...pointer};commands.push({action:null,pointer:{...pointer,...brush()}});if(tool==='obstacle')pointer=null;};
+canvas.onpointerdown=e=>{if(e.button!==0||saving||sharedId)return;canvas.setPointerCapture(e.pointerId);pointer=point(e);cursor=pointer;last={...pointer};commands.push({action:null,pointer:{...pointer,...brush()}});if(tool==='obstacle')pointer=null;};
 canvas.onpointermove=e=>{cursor=point(e);if(pointer)pointer=cursor;};
 canvas.onpointerup=canvas.onpointercancel=canvas.onlostpointercapture=()=>{pointer=null;last=null;};
 canvas.onpointerleave=()=>{if(!pointer)cursor=null;};
@@ -53,12 +63,17 @@ function decode(buffer){
 }
 function accept(frame){
  if(curr&&frame.meta.frame===curr.meta.frame)return;
+ const initial=!curr;
  const now=performance.now();
  if(curr){const span=Math.min(500,now-curr.at);interval=.8*interval+.2*span;
   if(span>0&&!frame.meta.paused)rate=.85*rate+.15*Math.min(1,Math.max(0,(frame.meta.time-curr.meta.time)/(span/1000)));
   prev=curr;}
  frame.at=now;curr=frame;if(!prev)prev=frame;
  state=frame.meta;
+ if(initial){
+  $('gravity').value=state.gravity??9.81;
+  if(!sharedId){try{const ui=JSON.parse(sessionStorage.getItem('fluidpy-restore-ui')||'null');if(ui)applyShareUI(ui);sessionStorage.removeItem('fluidpy-restore-ui');}catch{}}
+ }
  // Select the new material only once the server actually reports it.
  if(pendingMaterials>=0&&state.materials.length>pendingMaterials){kind=state.materials.length-1;pendingMaterials=-1;}
  if(kind>=state.materials.length)kind=state.materials.length-1;
@@ -97,15 +112,21 @@ function readout(force){
  const now=performance.now();
  if(!force&&now-lastReadout<100)return;          // the panel does not need 120 Hz
  lastReadout=now;
+ document.querySelectorAll('[data-container]').forEach(b=>{const active=b.dataset.container===state.container;b.classList.toggle('selected',active);b.setAttribute('aria-pressed',active);});
+ $('containerLabel').textContent=state.container?({mug:'Kaffeetasse',glass:'Trinkglas',toilet:'Toilette',bowl:'Schüssel',bucket:'Eimer'})[state.container]+' · oben eingießen':'Kein Gefäß ausgewählt';
  materialUI();$('pause').textContent=state.paused?'▶ Fortsetzen':'Ⅱ Pause';
  $('count').innerHTML=state.count+' <small>/ '+state.limit+'</small>';
  $('time').innerHTML=state.time.toFixed(2)+' <small>s</small>';
  $('meanTemp').innerHTML=state.temperature+' <small>°C</small>';
  $('speed').textContent=state.paused?'Pause':rate.toFixed(2)+'×';
+ const pits=state.holes?state.holes.length:0,open=state.holes_open||0;
  $('status').textContent=state.count>=state.limit?'PARTIKELLIMIT ERREICHT':state.paused?'PAUSIERT · WERKZEUGE AKTIV':
+  open?open+(open===1?' LOCH':' LÖCHER')+' DURCHGEFRESSEN':
+  pits?'GEFÄSS WIRD ANGEÄTZT · '+pits+' STELLEN':
   state.hot?state.hot+' BRENNENDE PARTIKEL':'SPH AKTIV · '+state.compute_ms+' ms / SCHRITT · '+Math.round(1000/Math.max(state.interval_ms,.1))+' SCHRITTE/S';
 }
 function nextBody(){
+ if(saving||sharedId||!state)return null;
  const cmd=commands.shift();
  if(cmd){sentGravity=+$('gravity').value;const body={...cmd,gravity:sentGravity};if(cmd.action===null)delete body.action;return{cmd,body};}
  if(pointer){sentGravity=+$('gravity').value;
@@ -126,11 +147,13 @@ async function input(){
   const started=performance.now();
   const next=nextBody();
   if(next){
+   inputBusy=true;
    try{
     const response=await fetch('/api/step',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(next.body)});
     if(!response.ok){const error=await response.json().catch(()=>({}));throw Error(error.error||'Serverfehler');}
     accept(decode(await response.arrayBuffer()));applied(next.cmd);readout(true);
    }catch(error){fail(error);await new Promise(r=>setTimeout(r,400));}
+   finally{inputBusy=false;}
   }
   // Pointer drags sample at 40 Hz; idle costs no requests at all.
   const budget=commands.length?0:(pointer?25:60),rest=budget-(performance.now()-started);
@@ -178,4 +201,4 @@ async function stream(){
   }
  }
 }
-if(renderer){renderer.resize(+$('quality').value);draw();stream();input();}
+if(renderer){fetch('/assets/vessels.json').then(r=>{if(!r.ok)throw Error('Gefäße konnten nicht geladen werden');return r.json();}).then(async assets=>{renderer.assets=assets;renderer.resize(+$('quality').value);if(sharedId){await openShared();draw();}else{draw();stream();input();}}).catch(fail);}

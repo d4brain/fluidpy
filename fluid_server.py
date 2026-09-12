@@ -11,19 +11,25 @@ import os
 import math
 import signal
 import socket
+import sqlite3
 from pathlib import Path
 import threading
 import time
 import webbrowser
+from urllib.parse import urlsplit
+from sharing import Shares, dump_sim, restore_sim, social_html, ID
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from physics import Simulation, Material, RESOLUTIONS, SCENES, PRESETS, cKDTree
 
-VERSION = '2.0'
+from containers import ASSETS
+
+VERSION = '2.2'
 STREAM_SECONDS = 120          # bounded so proxy read timeouts never cut a frame
 ROOT = Path(__file__).resolve().parent
-FILES = {'/': ('index.html', 'text/html; charset=utf-8'),
+FILES = {'/share.js': ('share.js', 'text/javascript'),'/': ('index.html', 'text/html; charset=utf-8'),
          '/style.css': ('style.css', 'text/css'),
          '/app.js': ('app.js', 'text/javascript'),
+         '/assets/vessels.json': ('assets/vessels.json', 'application/json'),
          '/renderer.js': ('renderer.js', 'text/javascript')}
 
 
@@ -67,6 +73,8 @@ class Engine:
         with self.inbox:
             if len(self.commands) < 60:        # bound the queue, never block
                 self.commands.append(apply_commands)
+                return True
+            return False
 
     def poll(self):
         self.last_poll = time.monotonic()
@@ -134,8 +142,11 @@ class Engine:
 def build_commands(data):
     """Validate the request once, then return a closure applied in the thread."""
     action = data.get('action')
-    if action not in (None, 'scene', 'pause', 'material', 'single', 'resolution'):
+    if action not in (None, 'scene', 'pause', 'material', 'single', 'resolution', 'container', 'empty_container'):
         raise ValueError('Unbekannte Aktion')
+    container = data.get('container')
+    if action == 'container' and (not isinstance(container, str) or container not in ASSETS):
+        raise ValueError('Unbekanntes Gefäß')
     scene = data.get('scene')
     if action == 'scene' and scene not in SCENES:
         raise ValueError('Unbekannte Szene')
@@ -167,6 +178,10 @@ def build_commands(data):
         sim.gravity = gravity
         if action == 'scene':
             sim.scene(scene)
+        elif action == 'container':
+            sim.set_container(container)
+        elif action == 'empty_container':
+            sim.empty_container()
         elif action == 'resolution':
             sim.set_resolution(resolution)
         elif action == 'pause':
@@ -192,8 +207,9 @@ def build_commands(data):
     return apply_commands
 
 
-def create_server(port=8765, host='127.0.0.1'):
+def create_server(port=8765, host='127.0.0.1', data_dir=None):
     engine = Engine()
+    shares = Shares(data_dir)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -255,7 +271,33 @@ def create_server(port=8765, host='127.0.0.1'):
                 pass
             self.close_connection = True
 
+        def public_base(self):
+            configured=os.environ.get('FLUIDPY_PUBLIC_URL','').rstrip('/')
+            if configured:return configured
+            host_header=self.headers.get('Host','localhost')
+            if not all(c.isalnum() or c in '.:-[]' for c in host_header):raise ValueError('Ungültiger Host')
+            hostname=urlsplit('//'+host_header).hostname
+            return ('http://' if hostname in ('127.0.0.1','localhost','::1') else 'https://')+host_header
+
         def do_GET(self):
+            route=urlsplit(self.path).path
+            if route.startswith('/s/') or route.startswith('/api/shares/'):
+                try:
+                    parts=route.strip('/').split('/')
+                    sid=parts[1] if parts[0]=='s' else parts[2]
+                    row=shares.get(sid)
+                    if route=='/s/'+sid:
+                        body=social_html((ROOT/'web/index.html').read_text(encoding='utf-8'),self.public_base(),sid)
+                        self.respond(body.encode(),mime='text/html; charset=utf-8')
+                    elif route in ('/s/'+sid+'/preview.png','/s/'+sid+'/post.png','/s/'+sid+'/story.png'):
+                        self.respond(row[parts[-1][:-4]],mime='image/png')
+                    elif route=='/api/shares/'+sid:
+                        import base64
+                        self.respond(json.dumps(dict(frame=base64.b64encode(row['frame']).decode(),ui=json.loads(row['ui']))).encode())
+                    else:self.respond(b'{}',404)
+                except (KeyError,IndexError,ValueError):self.respond(b'{"error":"Freigabe nicht gefunden"}',404)
+                except (OSError,sqlite3.Error):self.respond(b'{"error":"Speicher nicht erreichbar"}',503)
+                return
             if self.path == '/api/stream':
                 self.stream()
             elif self.path == '/api/frame':
@@ -277,25 +319,62 @@ def create_server(port=8765, host='127.0.0.1'):
                 self.respond(b'{}', 404)
 
         def do_POST(self):
-            if self.path != '/api/step':
+            if self.path not in ('/api/step','/api/capture','/api/shares','/api/restore'):
                 self.respond(b'{}', 404)
                 return
             # Reject cross-origin browser requests. Compared without the scheme
             # so the app also works behind a local TLS reverse proxy.
             origin = self.headers.get('Origin')
             if origin and origin.split('://')[-1] != (self.headers.get('Host') or ''):
+                self.close_connection=True
                 self.respond(b'{}', 403)
                 return
             try:
                 size = int(self.headers.get('Content-Length', '0'))
-                if not 0 <= size <= 32768:
+                if not 0 <= size <= (9_000_000 if self.path=='/api/shares' else 32768):
+                    self.close_connection=True
                     raise ValueError('Ungueltige Anfragegroesse')
                 data = json.loads(self.rfile.read(size)) if size else {}
                 if not isinstance(data, dict):
                     raise ValueError('JSON-Objekt erwartet')
-                if data:
+                if self.path=='/api/capture':
+                    ui=data.get('ui',{})
+                    if not isinstance(ui,dict):raise ValueError('Ansicht ungültig')
+                    ui={k:ui.get(k,v) for k,v in dict(view='fluid',kind=0,radius=6.5,temperature=20).items()}
+                    if ui['view'] not in ('fluid','thermal','particles'):raise ValueError('Ansicht ungültig')
+                    ui['kind']=int(number(ui,'kind',0,0,31));ui['radius']=number(ui,'radius',6.5,2.5,16);ui['temperature']=number(ui,'temperature',20,0,800)
+                    ready=threading.Event();capture={}
+                    def take_snapshot(sim):
+                        try:
+                            meta=dict(sim.meta(),paused=True,frame=engine.frame,compute_ms=0,interval_ms=16)
+                            capture.update(shares.capture(dump_sim(sim),frame_bytes(meta,sim.packed()),ui))
+                        except ValueError as exc:capture['error']=str(exc)
+                        finally:ready.set()
+                    if not engine.submit(take_snapshot):raise ValueError('Server ausgelastet. Erneut versuchen.')
+                    engine.poll()
+                    if not ready.wait(12):raise ValueError('Aufnahme nicht verfügbar. Erneut versuchen.')
+                    if 'error' in capture:raise ValueError(capture['error'])
+                    capture['url']=self.public_base()+'/s/'+capture['id']
+                    self.respond(json.dumps(capture).encode());return
+                if self.path=='/api/shares':
+                    sid=shares.save(data)
+                    self.respond(json.dumps(dict(id=sid,url=self.public_base()+'/s/'+sid)).encode());return
+                if self.path=='/api/restore':
+                    sid=data.get('id')
+                    if not isinstance(sid,str):raise ValueError('Freigabe fehlt')
+                    snapshot=json.loads(shares.get(sid)['state'])
+                    ready=threading.Event()
+                    def load_snapshot(sim):
+                        restore_sim(sim,snapshot);ready.set()
+                    if not engine.submit(load_snapshot):raise ValueError('Server ausgelastet')
+                    engine.poll()
+                    if not ready.wait(12):raise ValueError('Laden dauert zu lange. Bitte erneut versuchen.')
+                    with engine.lock:pass  # Wait for the restored frame to be published.
+                elif data:
                     engine.submit(build_commands(data))
                 self.respond(engine.poll(), mime='application/octet-stream')
+            except (OSError,sqlite3.Error):
+                self.respond(b'{"error":"Freigabespeicher nicht beschreibbar"}',503)
             except (ValueError, TypeError, KeyError, OverflowError) as exc:
                 self.respond(json.dumps({'error': str(exc)}).encode(), 400)
 

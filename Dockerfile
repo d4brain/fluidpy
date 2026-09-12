@@ -13,11 +13,11 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt "scipy>=1.11"
 
-COPY physics.py app.py fluid_server.py ./
+COPY physics.py containers.py sharing.py app.py fluid_server.py ./
 COPY web ./web
 
 # Unprivilegiert; das Abbild wird zur Laufzeit schreibgeschützt eingebunden.
-RUN useradd --system --uid 10001 fluid
+RUN useradd --system --uid 10001 fluid && mkdir /app/data && chown fluid /app/data
 USER 10001
 
 EXPOSE 8765

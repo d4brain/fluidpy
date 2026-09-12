@@ -80,6 +80,26 @@ class FluidRenderer {
     fragColor=vec4(c,1);
    }
   `);
+  this.vesselProgram=this.program(`#version 300 es
+   precision highp float;precision highp int;
+   layout(location=0) in vec2 pos;layout(location=1) in vec3 color;out vec3 tint;out vec2 world;
+   void main(){tint=color;world=pos+vec2(.85,.10);gl_Position=vec4(world/vec2(1.8,1.1)*2.0-1.0,0,1);}
+  `,`#version 300 es
+   precision highp float;precision highp int;in vec3 tint;in vec2 world;out vec4 fragColor;
+   uniform int holeCount;uniform vec3 holes[48];
+   void main(){
+    // Weggeätzte Scheiben fehlen ganz; knapp daneben bleibt ein angefressener Rand.
+    float near=1e9;
+    for(int i=0;i<48;i++){if(i>=holeCount)break;near=min(near,length(world-holes[i].xy)-holes[i].z);}
+    if(near<0.0)discard;
+    fragColor=vec4(mix(vec3(.30,.40,.16),tint,smoothstep(0.0,.014,near)),1);
+   }
+  `);
+  this.vesselVao=g.createVertexArray();g.bindVertexArray(this.vesselVao);
+  this.vesselBuffer=g.createBuffer();g.bindBuffer(g.ARRAY_BUFFER,this.vesselBuffer);
+  g.enableVertexAttribArray(0);g.vertexAttribPointer(0,2,g.FLOAT,false,20,0);
+  g.enableVertexAttribArray(1);g.vertexAttribPointer(1,3,g.FLOAT,false,20,8);
+  this.vesselKey=null;
   this.uniforms=new Map();
   this.palette=new Float32Array(96);this.solids=new Float32Array(32);
   this.vao=g.createVertexArray();g.bindVertexArray(this.vao);
@@ -157,5 +177,14 @@ class FluidRenderer {
   if(obstacles.length||this.hadObstacles){const obs=new Float32Array(90);obstacles.forEach((o,i)=>obs.set(o,i*3));g.uniform3fv(this.u(p,'obstacles[0]'),obs);this.hadObstacles=obstacles.length>0;}
   g.drawArrays(g.TRIANGLES,0,3);
   g.enable(g.BLEND);g.blendFunc(g.SRC_ALPHA,g.ONE_MINUS_SRC_ALPHA);this.particles(state,mode===1?1:3);g.disable(g.BLEND);
+  const asset=this.assets?.[state.container];
+  if(asset){
+   g.useProgram(this.vesselProgram);g.bindVertexArray(this.vesselVao);
+   if(this.vesselKey!==state.container){g.bindBuffer(g.ARRAY_BUFFER,this.vesselBuffer);g.bufferData(g.ARRAY_BUFFER,new Float32Array(asset.vertices),g.STATIC_DRAW);this.vesselKey=state.container;}
+   const holes=state.holes||[],v=this.vesselProgram;
+   g.uniform1i(this.u(v,'holeCount'),Math.min(holes.length,48));
+   if(holes.length||this.hadHoles){const buf=new Float32Array(144);holes.slice(0,48).forEach((o,i)=>buf.set(o,i*3));g.uniform3fv(this.u(v,'holes[0]'),buf);this.hadHoles=holes.length>0;}
+   g.drawArrays(g.TRIANGLES,0,asset.vertices.length/5);
+  }
  }
 }

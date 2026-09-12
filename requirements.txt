@@ -1,3 +1,5 @@
 numpy>=1.24,<3
 # Empfohlen, im Docker-Abbild fest enthalten: halbiert die Nachbarsuche.
 # pip install scipy
+
+Pillow>=10.4,<13
